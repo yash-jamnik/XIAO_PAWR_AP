@@ -1156,7 +1156,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define ONBOARDING_COOLDOWN_MS 700
+#define ONBOARDING_COOLDOWN_MS 1200
 
 static atomic_t onboarding_busy = ATOMIC_INIT(0);
 static int64_t last_onboard_time = 0;
@@ -1193,6 +1193,7 @@ static const struct bt_le_per_adv_param per_adv_params = {
 	.num_response_slots = NUM_RSP_SLOTS,
 };
 
+
 #define JOIN_THREAD_STACK_SIZE 1024
 #define JOIN_THREAD_PRIORITY 5
 K_THREAD_STACK_DEFINE(join_thread_stack, JOIN_THREAD_STACK_SIZE);
@@ -1204,7 +1205,8 @@ static struct bt_le_ext_adv *pawr_adv = NULL;
 
 BUILD_ASSERT(ARRAY_SIZE(bufs) == ARRAY_SIZE(subevent_data_params));
 BUILD_ASSERT(ARRAY_SIZE(backing_store) == ARRAY_SIZE(subevent_data_params));
-
+static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
+						 struct net_buf_simple *ad);
 struct pawr_timing
 {
 	uint8_t subevent;
@@ -1939,7 +1941,8 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 
 	bt_conn_unref(default_conn);
 	default_conn = NULL;
-
+    printk("Restarting scan\n");
+    bt_le_scan_start(BT_LE_SCAN_PASSIVE_CONTINUOUS, device_found);
 	/* release onboarding lock */
 	last_onboard_time = k_uptime_get();
 	atomic_set(&onboarding_busy, 0);
@@ -2290,7 +2293,10 @@ int main(void)
 			continue;
 		}
 
-		err = bt_le_scan_start(BT_LE_SCAN_PASSIVE_CONTINUOUS, device_found);
+		if (!default_conn)
+		{
+			err = bt_le_scan_start(BT_LE_SCAN_PASSIVE_CONTINUOUS, device_found);
+		}
 		if (err && err != -EALREADY)
 		{
 			printk("Scanning failed to start (err %d)\n", err);
@@ -2307,7 +2313,8 @@ int main(void)
 		}
 
 		printk("PAST sent\n");
-        k_sleep(K_MSEC(500));
+		// k_sleep(K_MSEC(500));
+		k_sleep(K_MSEC(700));
 		discover_params.uuid = &pawr_char_uuid.uuid;
 		discover_params.func = discover_func;
 		discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
@@ -2374,7 +2381,7 @@ int main(void)
 			clear_slot(slot_idx);
 			goto disconnect;
 		}
-        k_sleep(K_MSEC(800));
+		k_sleep(K_MSEC(800));
 		// Mark initial "alive" timestamp for this slot
 		// synced_devices[slot_idx].last_update_time = k_uptime_get();
 		synced_devices[slot_idx].last_sync_time = k_uptime_get();
@@ -2400,7 +2407,8 @@ int main(void)
 		}
 
 		k_sem_take(&sem_disconnected, K_FOREVER);
-		k_sleep(K_MSEC(400));
+		// k_sleep(K_MSEC(400));
+		k_sleep(K_MSEC(1200));
 	}
 
 	printk("Maximum number of syncs onboarded: %d devices\n", num_synced);

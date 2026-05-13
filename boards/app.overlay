@@ -1,0 +1,34 @@
+
+/{
+
+    chosen{
+        zephyr,uart_console = &uart30;
+        zephyr,console=&uart30;
+        zephyr,shell-uart=&uart30;
+        zephyr,uart-mcumgr=&uart30;
+    };
+};
+
+
+&uart30 {
+	status = "okay";
+};
+
+&uart30_default {
+	group1 {
+		psels = <NRF_PSEL(UART_TX, 0, 2)>, <NRF_PSEL(UART_RTS, 0, 0)>;
+	};
+
+	group2 {
+		psels = <NRF_PSEL(UART_RX, 0, 3)>, <NRF_PSEL(UART_CTS, 0, 1)>;
+	};
+};
+
+&uart30_sleep {
+	group1 {
+		psels = <NRF_PSEL(UART_TX, 0, 2)>,
+				<NRF_PSEL(UART_RX, 0, 3)>,
+				<NRF_PSEL(UART_RTS, 0, 0)>,
+				<NRF_PSEL(UART_CTS, 0, 1)>;
+	};
+};

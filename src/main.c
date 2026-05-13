@@ -10,6 +10,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "src/command.pb.h"
+#include "pb_encode.h"
 #include <zephyr/bluetooth/att.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
@@ -23,6 +25,47 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+int parse_mac(const char *str, uint8_t *mac)
+{
+	return sscanf(str, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+				  &mac[0], &mac[1], &mac[2],
+				  &mac[3], &mac[4], &mac[5]);
+}
+
+void test_proto(void)
+{
+	Command cmd = Command_init_zero;
+
+	// 🔹 Fill data
+	cmd.request_id = 1;
+	cmd.which_cmd = Command_led_tag;
+	// cmd.cmd.led = 123;
+
+	uint8_t buffer[30];
+
+	pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
+
+	// 🔹 Encode
+	if (!pb_encode(&stream, Command_fields, &cmd))
+	{
+		printk("❌ Encode failed\n");
+		return;
+	}
+
+	size_t len = stream.bytes_written;
+
+	// 🔹 Print result
+	printk("✅ Encoded size: %d\n", (int)len);
+
+	printk("HEX: ");
+	for (int i = 0; i < len; i++)
+	{
+		printk("%02X ", buffer[i]);
+	}
+	printk("\n");
+
+	// 🔹 Optional: store globally for later PAwR use
+}
 #define ONBOARDING_COOLDOWN_MS 3000
 
 static atomic_t onboarding_busy = ATOMIC_INIT(0);
@@ -40,6 +83,9 @@ static int64_t last_onboard_time = 0;
 #define INVALID_SLOT 0xFF
 #define ADDR_STR_LEN BT_ADDR_LE_STR_LEN // full bt_addr_le_to_str() string
 
+static uint8_t proto_buf[PACKET_SIZE];
+static size_t proto_len = 0;
+static bool proto_command_active = false;
 static K_SEM_DEFINE(sem_connected, 0, 1);
 static K_SEM_DEFINE(sem_discovered, 0, 1);
 static K_SEM_DEFINE(sem_written, 0, 1);
@@ -50,13 +96,13 @@ static struct bt_uuid_128 pawr_char_uuid =
 static uint16_t pawr_attr_handle;
 
 static const struct bt_le_per_adv_param per_adv_params = {
-	.interval_min = 0x400, // 625 ms
-	.interval_max = 0x400, // 937.5 ms
+	.interval_min = 0x400, 
+	.interval_max = 0x400, 
 	.options = 0,
 	.num_subevents = NUM_SUBEVENTS,
-	.subevent_interval = 0x50,	   // 31.25 ms
-	.response_slot_delay = 0x10,   // 6.25 ms
-	.response_slot_spacing = 0x40, // 50 ms
+	.subevent_interval = 0x50,	   
+	.response_slot_delay = 0x10,   
+	.response_slot_spacing = 0x40,
 	.num_response_slots = NUM_RSP_SLOTS,
 };
 
@@ -89,8 +135,11 @@ static char current_command[CMD_BUF_SIZE] = "[+]join,9999";
 
 // Temporary "join" command state: active for N ms, then revert to default
 #define TEMP_CMD_DURATION_MS 5000 // "few seconds" – adjust as you like
+#define RESPONSE_WINDOW_TIMEOUT_MS 3000
 static bool temp_command_active = false;
 static int64_t temp_command_expiry_ms = 0;
+static bool response_window_active = false;
+static int64_t response_window_expiry_ms = 0;
 
 // Structure to store synced device information
 struct synced_device
@@ -348,6 +397,66 @@ static int send_command_to_synced_devices(struct bt_le_ext_adv *pawr_adv, const 
 	return 0;
 }
 
+static uint8_t mac_buf[6];
+
+bool mac_encode_callback(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
+{
+	return pb_encode_tag_for_field(stream, field) &&
+		   pb_encode_string(stream, mac_buf, 6);
+}
+
+void encode_led_command_with_mac(uint8_t *mac)
+{
+	Command cmd = Command_init_zero;
+
+	cmd.request_id = 1;
+	cmd.which_cmd = Command_led_tag;
+
+	memcpy(mac_buf, mac, 6);
+
+	cmd.cmd.led.mac.funcs.encode = mac_encode_callback;
+	cmd.cmd.led.mac.arg = NULL;
+
+	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+
+	if (!pb_encode(&stream, Command_fields, &cmd))
+	{
+		printk("Encode failed\n");
+		proto_len = 0;
+		proto_command_active = false;
+		return;
+	}
+
+	proto_len = stream.bytes_written;
+	proto_command_active = true;
+	printk("Proto len: %d\n", (int)proto_len);
+}
+
+void encode_join_command_with_mac(uint8_t *mac)
+{
+	Command cmd = Command_init_zero;
+
+	cmd.request_id = 1;
+	cmd.which_cmd = Command_join_tag;
+
+	memcpy(mac_buf, mac, 6);
+
+	cmd.cmd.join.mac.funcs.encode = mac_encode_callback;
+	cmd.cmd.join.mac.arg = NULL;
+
+	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+	if (!pb_encode(&stream, Command_fields, &cmd))
+	{
+		printk("Join encode failed\n");
+		proto_len = 0;
+		proto_command_active = false;
+		return;
+	}
+
+	proto_len = stream.bytes_written;
+	proto_command_active = true;
+	printk("Join proto len: %d\n", (int)proto_len);
+}
 // Function to parse and handle commands
 static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 {
@@ -357,28 +466,34 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 
 	if (strncmp(cmd, "[+]join,", 8) == 0)
 	{
-		const char *param = cmd + 8;
-		int join_param = atoi(param);
+		const char *mac_str = cmd + 8;
+		uint8_t mac[6];
 
-		printk("Join command detected with parameter: %d\n", join_param);
+		if (parse_mac(mac_str, mac) != 6)
+		{
+			printk("Invalid MAC format\n");
+			return;
+		}
+
 		display_synced_devices_status();
 
 		// Activate temporary join command for a few seconds
 		temp_command_active = true;
 		temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
 
-		int err = send_command_to_synced_devices(pawr_adv, cmd);
-		if (err)
-		{
-			printk("ERROR: Failed to send join command to devices (err %d)\n", err);
-		}
-		else
+		encode_join_command_with_mac(mac);
+		if (proto_command_active && proto_len > 0)
 		{
 			printk("SUCCESS: Join command sent to all synced devices (burst mode)\n");
 			printk("Temporary command active for %d ms\n", TEMP_CMD_DURATION_MS);
 		}
+		else
+		{
+			printk("ERROR: Failed to send join command to devices\n");
+		}
 	}
 	else if (strncmp(cmd, "join,", 5) == 0)
+	
 	{
 		const char *param = cmd + 5;
 		int join_param = atoi(param);
@@ -442,17 +557,31 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 	else if (strncmp(cmd, "[+]led,", 7) == 0)
 	{
 
-		const char *param = cmd + 7;
+		const char *mac_str = cmd + 7;
 
-		printk("LED command detected with parameter: %s\n", param);
+		uint8_t mac[6];
+
+		if (parse_mac(mac_str, mac) != 6)
+		{
+			printk("Invalid MAC format\n");
+			return;
+		}
+
+		printk("LED command for MAC: %s\n", mac_str);
+
 		display_synced_devices_status();
 
-		// Activate temporary LED command for a few seconds
+		// keep your existing timing logic
 		temp_command_active = true;
 		temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
 
-		int err = send_command_to_synced_devices(pawr_adv, cmd);
-		printk("[+]LED_COMMAND_SENT_SUCCESS\n");
+		response_window_active = true;
+		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
+
+		// 🔥 THIS IS THE MAIN CHANGE
+		encode_led_command_with_mac(mac);
+
+		printk("[+]LED_PROTO_READY\n");
 	}
 
 	else if (strcmp(cmd, "help") == 0)
@@ -561,6 +690,8 @@ static void update_temp_command_state(void)
 {
 	if (!temp_command_active)
 	{
+		proto_len = 0; // Clear proto buffer when not active
+		proto_command_active = false;
 		return;
 	}
 
@@ -572,7 +703,24 @@ static void update_temp_command_state(void)
 		current_command[CMD_BUF_SIZE - 1] = '\0';
 		temp_command_active = false;
 		temp_command_expiry_ms = 0;
+		proto_len = 0;
+		proto_command_active = false;
 		printk("Current command reverted to: '%s'\n", current_command);
+	}
+}
+
+static void update_response_window_state(void)
+{
+	if (!response_window_active)
+	{
+		return;
+	}
+
+	int64_t now = k_uptime_get();
+	if (now >= response_window_expiry_ms)
+	{
+		response_window_active = false;
+		printk("Response window expired\n");
 	}
 }
 static uint8_t current_response_subevent = 0;
@@ -599,6 +747,7 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 	// Handle temporary command expiry
 	update_temp_command_state();
+	update_response_window_state();
 
 	// Local copy of command
 	char cmd_local[CMD_BUF_SIZE];
@@ -618,10 +767,24 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 		memset(buf->data, 0, PACKET_SIZE);
 
-		size_t copy_len = MIN(cmd_len, PACKET_SIZE - 1);
-		memcpy(buf->data, cmd_local, copy_len);
-		buf->data[copy_len] = '\0';
-		buf->len = copy_len + 1;
+		if (proto_command_active && proto_len > 0)
+		{
+			size_t copy_len = MIN(proto_len, PACKET_SIZE);
+
+			memcpy(buf->data, proto_buf, copy_len);
+			//  printk("Sending proto len: %d\n", proto_len);
+			buf->len = copy_len;
+		}
+		else
+		{
+			const char *msg = "CHECK_DEVICE";
+			size_t len = strlen(msg);
+
+			memcpy(buf->data, msg, len);
+			buf->len = len;
+
+			// printk(">>> Sending CHECK_DEVICE\n");
+		}
 
 		subevent_data_params[i].subevent = subevent;
 		subevent_data_params[i].response_slot_start = 0;
@@ -678,8 +841,26 @@ static void response_cb(struct bt_le_ext_adv *adv,
 						struct bt_le_per_adv_response_info *info,
 						struct net_buf_simple *buf)
 {
+	bool should_print = response_window_active;
 	if (buf && buf->len > 0)
 	{
+		if (should_print)
+		{
+			printk("Response text: ");
+			for (size_t i = 0; i < buf->len; i++)
+			{
+				char c = buf->data[i];
+				if (c == '\0')
+				{
+					break;
+				}
+				if (c >= 0x20 && c <= 0x7E)
+				{
+					printk("%c", c);
+				}
+			}
+			printk("\n");
+		}
 		// printk("=== Device Response ===\n");
 		// printk("From: subevent %d, slot %d\n", info->subevent, info->response_slot);
 		// printk("Response length: %d bytes\n", buf->len);
@@ -701,18 +882,6 @@ static void response_cb(struct bt_le_ext_adv *adv,
 
 		if (is_text && buf->len < 128)
 		{
-			// printk("Response text: ");
-			for (size_t i = 0; i < buf->len; i++)
-			{
-				if (buf->data[i] >= 0x20 && buf->data[i] <= 0x7E)
-				{
-					// printk("%c", buf->data[i]);
-				}
-				else if (buf->data[i] == 0x00)
-				{
-					break;
-				}
-			}
 			// printk("\n");
 
 			// If response starts with "devid,", extract the ID

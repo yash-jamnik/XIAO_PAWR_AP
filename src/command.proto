@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+message Command {
+  uint32 request_id = 1;
+
+  oneof cmd {
+    LedCommand led = 2;
+    JoinCommand join = 3;
+  }
+}
+
+message LedCommand {
+  bytes mac = 1;
+}
+
+message JoinCommand {
+  bytes mac = 1;
+}

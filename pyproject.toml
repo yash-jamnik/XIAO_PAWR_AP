@@ -1,0 +1,9 @@
+[project]
+name = "nrf54l15-xiao-ap-pawr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "nanopb>=0.4.9.1",
+]

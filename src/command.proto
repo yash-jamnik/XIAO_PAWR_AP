@@ -6,6 +6,7 @@ message Command {
   oneof cmd {
     LedCommand led = 2;
     JoinCommand join = 3;
+    OtaCommand ota = 4;
   }
 }
 
@@ -15,4 +16,8 @@ message LedCommand {
 
 message JoinCommand {
   bytes mac = 1;
+}
+
+message OtaCommand {
+bytes mac_id = 1;
 }

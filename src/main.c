@@ -438,6 +438,7 @@ static int send_command_to_synced_devices(struct bt_le_ext_adv *pawr_adv, const 
 }
 
 static uint8_t mac_buf[6];
+static uint8_t otc_mac_buff[6];
 
 bool mac_encode_callback(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
 {
@@ -445,6 +446,13 @@ bool mac_encode_callback(pb_ostream_t *stream, const pb_field_t *field, void *co
 		   pb_encode_string(stream, mac_buf, 6);
 }
 
+bool otc_mac_encode_callback(pb_ostream_t *stream,
+							 const pb_field_t *field,
+							 void *const *arg)
+{
+	return pb_encode_tag_for_field(stream, field) &&
+		   pb_encode_string(stream, otc_mac_buff, 6);
+}
 void encode_led_command_with_mac(uint8_t *mac)
 {
 	Command cmd = Command_init_zero;
@@ -472,19 +480,26 @@ void encode_led_command_with_mac(uint8_t *mac)
 	APP_LOG("Proto len: %d\n", (int)proto_len);
 }
 
-void encode_join_command_with_mac(uint8_t *mac)
+void encode_join_command_with_mac(uint8_t *esl_mac,
+								  uint8_t *ots_mac)
 {
 	Command cmd = Command_init_zero;
 
 	cmd.request_id = 1;
 	cmd.which_cmd = Command_join_tag;
 
-	memcpy(mac_buf, mac, 6);
+	memcpy(mac_buf, esl_mac, 6);
+	memcpy(otc_mac_buff, ots_mac, 6);
 
 	cmd.cmd.join.mac.funcs.encode = mac_encode_callback;
 	cmd.cmd.join.mac.arg = NULL;
 
-	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+	cmd.cmd.join.ots_mac.funcs.encode = otc_mac_encode_callback;
+	cmd.cmd.join.ots_mac.arg = NULL;
+
+	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf,
+												 sizeof(proto_buf));
+
 	if (!pb_encode(&stream, Command_fields, &cmd))
 	{
 		APP_LOG("Join encode failed\n");
@@ -495,20 +510,26 @@ void encode_join_command_with_mac(uint8_t *mac)
 
 	proto_len = stream.bytes_written;
 	proto_command_active = true;
+
 	APP_LOG("Join proto len: %d\n", (int)proto_len);
 }
 
-void encode_ota_command_with_mac(uint8_t *mac)
+void encode_ota_command_with_mac(uint8_t *esl_mac,
+								 uint8_t *ots_mac)
 {
 	Command cmd = Command_init_zero;
 
 	cmd.request_id = 1;
 	cmd.which_cmd = Command_ota_tag;
 
-	memcpy(mac_buf, mac, 6);
+	memcpy(mac_buf, esl_mac, 6);
+	memcpy(otc_mac_buff, ots_mac, 6);
 
-	cmd.cmd.ota.mac_id.funcs.encode = mac_encode_callback;
-	cmd.cmd.ota.mac_id.arg = NULL;
+	cmd.cmd.ota.mac.funcs.encode = mac_encode_callback;
+	cmd.cmd.ota.mac.arg = NULL;
+
+	cmd.cmd.ota.ots_mac.funcs.encode = otc_mac_encode_callback;
+	cmd.cmd.ota.ots_mac.arg = NULL;
 
 	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
 	if (!pb_encode(&stream, Command_fields, &cmd))
@@ -532,30 +553,50 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 
 	if (strncmp(cmd, "[+]join,", 8) == 0)
 	{
-		const char *mac_str = cmd + 8;
-		uint8_t mac[6];
+		char esl_mac_str[32];
+		char ots_mac_str[32];
 
-		if (parse_mac(mac_str, mac) != 6)
+		uint8_t esl_mac[6];
+		uint8_t ots_mac[6];
+
+		if (sscanf(cmd,
+				   "[+]join,%31[^,],%31s",
+				   esl_mac_str,
+				   ots_mac_str) != 2)
 		{
-			APP_LOG("Invalid MAC format\n");
+			APP_LOG("Invalid join format\n");
+			APP_LOG("Expected: [+]join,<esl_mac>,<ots_mac>\n");
+			return;
+		}
+
+		if (parse_mac(esl_mac_str, esl_mac) != 6)
+		{
+			APP_LOG("Invalid ESL MAC\n");
+			return;
+		}
+
+		if (parse_mac(ots_mac_str, ots_mac) != 6)
+		{
+			APP_LOG("Invalid OTS MAC\n");
 			return;
 		}
 
 		display_synced_devices_status();
 
-		// Activate temporary join command for a few seconds
 		temp_command_active = true;
 		temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
 
-		encode_join_command_with_mac(mac);
+		encode_join_command_with_mac(esl_mac, ots_mac);
+
 		if (proto_command_active && proto_len > 0)
 		{
-			APP_LOG("SUCCESS: Join command sent to all synced devices (burst mode)\n");
-			APP_LOG("Temporary command active for %d ms\n", TEMP_CMD_DURATION_MS);
+			APP_LOG("SUCCESS: Join command sent\n");
+			APP_LOG("ESL MAC : %s\n", esl_mac_str);
+			APP_LOG("OTS MAC : %s\n", ots_mac_str);
 		}
 		else
 		{
-			APP_LOG("ERROR: Failed to send join command to devices\n");
+			APP_LOG("ERROR: Failed to send join command\n");
 		}
 	}
 	else if (strncmp(cmd, "join,", 5) == 0)
@@ -651,17 +692,36 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 	}
 	else if (strncmp(cmd, "[+]ota,", 7) == 0)
 	{
-		const char *mac_str = cmd + 7;
+		char esl_mac_str[32];
+		char ots_mac_str[32];
 
-		uint8_t mac[6];
+		uint8_t esl_mac[6];
+		uint8_t ots_mac[6];
 
-		if (parse_mac(mac_str, mac) != 6)
+		if (sscanf(cmd,
+				   "[+]ota,%31[^,],%31s",
+				   esl_mac_str,
+				   ots_mac_str) != 2)
 		{
-			APP_LOG("Invalid MAC format\n");
+			APP_LOG("Invalid OTA format\n");
+			APP_LOG("Expected: [+]ota,<esl_mac>,<ots_mac>\n");
 			return;
 		}
 
-		APP_LOG("OTA command for MAC: %s\n", mac_str);
+		if (parse_mac(esl_mac_str, esl_mac) != 6)
+		{
+			APP_LOG("Invalid ESL MAC\n");
+			return;
+		}
+
+		if (parse_mac(ots_mac_str, ots_mac) != 6)
+		{
+			APP_LOG("Invalid OTS MAC\n");
+			return;
+		}
+
+		APP_LOG("OTA command for ESL MAC: %s\n", esl_mac_str);
+		APP_LOG("OTA command for OTS MAC: %s\n", ots_mac_str);
 
 		display_synced_devices_status();
 
@@ -673,7 +733,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
 
 		// 🔥 THIS IS THE MAIN CHANGE
-		encode_ota_command_with_mac(mac);
+		encode_ota_command_with_mac(esl_mac, ots_mac);
 
 		APP_LOG("[+]OTA_PROTO_READY\n");
 	}
@@ -681,8 +741,9 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 	{
 		APP_LOG("\nAvailable commands:\n");
 		APP_LOG("  <number>         - Set join command (e.g., '1234' sends [+]join,1234 in burst)\n");
-		APP_LOG("  [+]join,<param>  - Set join command (burst for a few seconds)\n");
-		APP_LOG("[+]led,<param>   - Set LED command (burst for a few seconds)\n");
+		APP_LOG("  [+]join,<esl_mac>,<ots_mac> - Set join command (burst for a few seconds)\n");
+		APP_LOG("  [+]led,<esl_mac> - Set LED command (burst for a few seconds)\n");
+		APP_LOG("  [+]ota,<esl_mac>,<ots_mac> - Set OTA command (burst for a few seconds)\n");
 		APP_LOG("  join,<param>     - Auto-format join command (burst)\n");
 		APP_LOG("  test             - Reset to default join command [+]join,9999\n");
 		APP_LOG("  status           - Show synced devices and current command\n");
@@ -1405,14 +1466,14 @@ void maint_thread(void *p1, void *p2, void *p3)
 
 int main(void)
 {
-	APP_LOG("APPLICATION STARTED 3\n");
+	APP_LOG("APPLICATION STARTED 2\n");
 	int err;
 	struct bt_gatt_discover_params discover_params;
 	struct bt_gatt_write_params write_params;
 	struct pawr_timing sync_config;
 
 	init_bufs();
-    // NVS initialization
+	// NVS initialization
 	err = nvs_init_app();
 	if (err)
 	{

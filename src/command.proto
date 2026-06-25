@@ -16,8 +16,10 @@ message LedCommand {
 
 message JoinCommand {
   bytes mac = 1;
+  bytes ots_mac = 2;
 }
-
-message OtaCommand {
-bytes mac_id = 1;
+ 
+message OtaCommand{
+  bytes mac = 1;
+  bytes ots_mac= 2;
 }

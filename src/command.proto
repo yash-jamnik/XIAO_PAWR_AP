@@ -7,6 +7,8 @@ message Command {
     LedCommand led = 2;
     JoinCommand join = 3;
     OtaCommand ota = 4;
+    TelCommand tel = 5;
+    TelResponse tel_res = 6;
   }
 }
 
@@ -19,7 +21,16 @@ message JoinCommand {
   bytes ots_mac = 2;
 }
  
-message OtaCommand{
+message OtaCommand {
   bytes mac = 1;
-  bytes ots_mac= 2;
+  bytes ots_mac = 2;
+}
+
+message TelCommand {
+  bytes mac = 1;
+}
+
+message TelResponse {
+  bytes mac = 1;
+  string meta = 2;
 }

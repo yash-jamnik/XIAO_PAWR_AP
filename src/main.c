@@ -27,9 +27,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <zephyr/fs/nvs.h>
-
+#include "pb_decode.h"
 static struct nvs_fs fs;
-
+static char active_command_mac[BT_ADDR_STR_LEN] = {0};
 #define NVS_ID_MCUMGR_MODE 1
 
 #include <zephyr/storage/flash_map.h>
@@ -437,112 +437,131 @@ static int send_command_to_synced_devices(struct bt_le_ext_adv *pawr_adv, const 
 	return 0;
 }
 
-static uint8_t mac_buf[6];
-static uint8_t otc_mac_buff[6];
 
-bool mac_encode_callback(pb_ostream_t *stream, const pb_field_t *field, void *const *arg)
+
+static void format_mac_hex(const uint8_t *mac,
+						   char *out,
+						   size_t out_size)
 {
-	return pb_encode_tag_for_field(stream, field) &&
-		   pb_encode_string(stream, mac_buf, 6);
+	snprintf(out,
+			 out_size,
+			 "%02X:%02X:%02X:%02X:%02X:%02X",
+			 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-bool otc_mac_encode_callback(pb_ostream_t *stream,
-							 const pb_field_t *field,
-							 void *const *arg)
+// DELETE these - no longer needed
+// static uint8_t mac_buf[6];
+// static uint8_t otc_mac_buff[6];
+// bool mac_encode_callback(...)
+// bool otc_mac_encode_callback(...)
+// struct pb_bytes_decode_ctx
+// static bool bytes_decode_callback(...)
+
+static bool decode_tel_response(const uint8_t *data, size_t len,
+                                char *mac_out, size_t mac_out_size,
+                                char *meta_out, size_t meta_out_size)
 {
-	return pb_encode_tag_for_field(stream, field) &&
-		   pb_encode_string(stream, otc_mac_buff, 6);
+    Command msg = Command_init_zero;
+    pb_istream_t stream = pb_istream_from_buffer(data, len);
+
+    if (!pb_decode(&stream, Command_fields, &msg))
+        return false;
+
+    if (msg.which_cmd != Command_tel_res_tag)
+        return false;
+
+    if (msg.cmd.tel_res.mac.size != 6)
+        return false;
+
+    format_mac_hex(msg.cmd.tel_res.mac.bytes, mac_out, mac_out_size);
+    strncpy(meta_out, msg.cmd.tel_res.meta, meta_out_size - 1);
+    meta_out[meta_out_size - 1] = '\0';
+
+    return true;
 }
+
 void encode_led_command_with_mac(uint8_t *mac)
 {
-	Command cmd = Command_init_zero;
+    Command cmd = Command_init_zero;
+    cmd.request_id = 1;
+    cmd.which_cmd = Command_led_tag;
+    memcpy(cmd.cmd.led.mac.bytes, mac, 6);
+    cmd.cmd.led.mac.size = 6;
 
-	cmd.request_id = 1;
-	cmd.which_cmd = Command_led_tag;
-
-	memcpy(mac_buf, mac, 6);
-
-	cmd.cmd.led.mac.funcs.encode = mac_encode_callback;
-	cmd.cmd.led.mac.arg = NULL;
-
-	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
-
-	if (!pb_encode(&stream, Command_fields, &cmd))
-	{
-		APP_LOG(" Encode failed\n");
-		proto_len = 0;
-		proto_command_active = false;
-		return;
-	}
-
-	proto_len = stream.bytes_written;
-	proto_command_active = true;
-	APP_LOG("Proto len: %d\n", (int)proto_len);
+    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+    if (!pb_encode(&stream, Command_fields, &cmd)) {
+        APP_LOG("Encode failed\n");
+        proto_len = 0;
+        proto_command_active = false;
+        return;
+    }
+    proto_len = stream.bytes_written;
+    proto_command_active = true;
+    APP_LOG("Proto len: %d\n", (int)proto_len);
 }
 
-void encode_join_command_with_mac(uint8_t *esl_mac,
-								  uint8_t *ots_mac)
+void encode_join_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
 {
-	Command cmd = Command_init_zero;
+    Command cmd = Command_init_zero;
+    cmd.request_id = 1;
+    cmd.which_cmd = Command_join_tag;
+    memcpy(cmd.cmd.join.mac.bytes, esl_mac, 6);
+    cmd.cmd.join.mac.size = 6;
+    memcpy(cmd.cmd.join.ots_mac.bytes, ots_mac, 6);
+    cmd.cmd.join.ots_mac.size = 6;
 
-	cmd.request_id = 1;
-	cmd.which_cmd = Command_join_tag;
-
-	memcpy(mac_buf, esl_mac, 6);
-	memcpy(otc_mac_buff, ots_mac, 6);
-
-	cmd.cmd.join.mac.funcs.encode = mac_encode_callback;
-	cmd.cmd.join.mac.arg = NULL;
-
-	cmd.cmd.join.ots_mac.funcs.encode = otc_mac_encode_callback;
-	cmd.cmd.join.ots_mac.arg = NULL;
-
-	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf,
-												 sizeof(proto_buf));
-
-	if (!pb_encode(&stream, Command_fields, &cmd))
-	{
-		APP_LOG("Join encode failed\n");
-		proto_len = 0;
-		proto_command_active = false;
-		return;
-	}
-
-	proto_len = stream.bytes_written;
-	proto_command_active = true;
-
-	APP_LOG("Join proto len: %d\n", (int)proto_len);
+    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+    if (!pb_encode(&stream, Command_fields, &cmd)) {
+        APP_LOG("Join encode failed\n");
+        proto_len = 0;
+        proto_command_active = false;
+        return;
+    }
+    proto_len = stream.bytes_written;
+    proto_command_active = true;
+    APP_LOG("Join proto len: %d\n", (int)proto_len);
 }
 
-void encode_ota_command_with_mac(uint8_t *esl_mac,
-								 uint8_t *ots_mac)
+void encode_ota_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
 {
-	Command cmd = Command_init_zero;
+    Command cmd = Command_init_zero;
+    cmd.request_id = 1;
+    cmd.which_cmd = Command_ota_tag;
+    memcpy(cmd.cmd.ota.mac.bytes, esl_mac, 6);
+    cmd.cmd.ota.mac.size = 6;
+    memcpy(cmd.cmd.ota.ots_mac.bytes, ots_mac, 6);
+    cmd.cmd.ota.ots_mac.size = 6;
 
-	cmd.request_id = 1;
-	cmd.which_cmd = Command_ota_tag;
+    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+    if (!pb_encode(&stream, Command_fields, &cmd)) {
+        APP_LOG("OTA encode failed\n");
+        proto_len = 0;
+        proto_command_active = false;
+        return;
+    }
+    proto_len = stream.bytes_written;
+    proto_command_active = true;
+    APP_LOG("OTA proto len: %d\n", (int)proto_len);
+}
 
-	memcpy(mac_buf, esl_mac, 6);
-	memcpy(otc_mac_buff, ots_mac, 6);
+void encode_tel_command_with_mac(uint8_t *mac)
+{
+    Command cmd = Command_init_zero;
+    cmd.request_id = 1;
+    cmd.which_cmd = Command_tel_tag;
+    memcpy(cmd.cmd.tel.mac.bytes, mac, 6);
+    cmd.cmd.tel.mac.size = 6;
 
-	cmd.cmd.ota.mac.funcs.encode = mac_encode_callback;
-	cmd.cmd.ota.mac.arg = NULL;
-
-	cmd.cmd.ota.ots_mac.funcs.encode = otc_mac_encode_callback;
-	cmd.cmd.ota.ots_mac.arg = NULL;
-
-	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
-	if (!pb_encode(&stream, Command_fields, &cmd))
-	{
-		APP_LOG("OTA encode failed\n");
-		proto_len = 0;
-		proto_command_active = false;
-		return;
-	}
-
-	proto_len = stream.bytes_written;
-	proto_command_active = true;
-	APP_LOG("OTA proto len: %d\n", (int)proto_len);
+    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+    if (!pb_encode(&stream, Command_fields, &cmd)) {
+        APP_LOG("TEL encode failed\n");
+        proto_len = 0;
+        proto_command_active = false;
+        return;
+    }
+    proto_len = stream.bytes_written;
+    proto_command_active = true;
+    APP_LOG("TEL proto len: %d\n", (int)proto_len);
 }
 // Function to parse and handle commands
 static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
@@ -737,6 +756,33 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 
 		APP_LOG("[+]OTA_PROTO_READY\n");
 	}
+	else if (strncmp(cmd, "[+]tel,", 7) == 0)
+	{
+		const char *mac_str = cmd + 7;
+		uint8_t mac[6];
+
+		if (parse_mac(mac_str, mac) != 6)
+		{
+			APP_LOG("Invalid MAC format\n");
+			APP_LOG("Expected: [+]tel,<mac>\n");
+			return;
+		}
+
+		APP_LOG("TEL command for MAC: %s\n", mac_str);
+
+		display_synced_devices_status();
+
+		temp_command_active = true;
+		temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
+
+		response_window_active = true;
+		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
+		snprintf(active_command_mac, sizeof(active_command_mac),
+				 "%s (random)", mac_str);
+		encode_tel_command_with_mac(mac);
+
+		APP_LOG("[+]TEL_PROTO_READY\n");
+	}
 	else if (strcmp(cmd, "help") == 0)
 	{
 		APP_LOG("\nAvailable commands:\n");
@@ -744,6 +790,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		APP_LOG("  [+]join,<esl_mac>,<ots_mac> - Set join command (burst for a few seconds)\n");
 		APP_LOG("  [+]led,<esl_mac> - Set LED command (burst for a few seconds)\n");
 		APP_LOG("  [+]ota,<esl_mac>,<ots_mac> - Set OTA command (burst for a few seconds)\n");
+		APP_LOG("  [+]tel,<mac> - Set TEL command (burst for a few seconds)\n");
 		APP_LOG("  join,<param>     - Auto-format join command (burst)\n");
 		APP_LOG("  test             - Reset to default join command [+]join,9999\n");
 		APP_LOG("  status           - Show synced devices and current command\n");
@@ -837,6 +884,7 @@ void join_command_thread(void *pawr_adv_ptr, void *unused1, void *unused2)
 	APP_LOG("Quick commands:\n");
 	APP_LOG("  1234             - Send join command with parameter 1234 (burst)\n");
 	APP_LOG("  join,1234        - Send join command with parameter 1234 (burst)\n");
+	APP_LOG("  [+]tel,AA:BB:CC:DD:EE:FF - Send TEL command for one device\n");
 	APP_LOG("  test             - Reset to default join command [+]join,9999\n");
 	APP_LOG("  status           - Show synced devices and current command\n");
 	APP_LOG("  refresh          - Force send current command now\n");
@@ -879,6 +927,7 @@ static void update_temp_command_state(void)
 		temp_command_expiry_ms = 0;
 		proto_len = 0;
 		proto_command_active = false;
+		active_command_mac[0] = '\0';
 		APP_LOG("Current command reverted to: '%s'\n", current_command);
 	}
 }
@@ -962,8 +1011,12 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 		subevent_data_params[i].subevent = subevent;
 		subevent_data_params[i].response_slot_start = 0;
-		if (subevent == current_response_subevent ||
-			subevent == ((current_response_subevent + 1) % NUM_SUBEVENTS))
+		if (proto_command_active && proto_len > 0)
+		{
+			subevent_data_params[i].response_slot_count = NUM_RSP_SLOTS;
+		}
+		else if (subevent == current_response_subevent ||
+				 subevent == ((current_response_subevent + 1) % NUM_SUBEVENTS))
 		{
 			subevent_data_params[i].response_slot_count = NUM_RSP_SLOTS;
 		}
@@ -971,7 +1024,6 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		{
 			subevent_data_params[i].response_slot_count = 0;
 		}
-
 		subevent_data_params[i].data = buf;
 	}
 
@@ -1015,9 +1067,49 @@ static void response_cb(struct bt_le_ext_adv *adv,
 						struct bt_le_per_adv_response_info *info,
 						struct net_buf_simple *buf)
 {
+	ARG_UNUSED(adv);
+
 	bool should_print = response_window_active;
 	if (buf && buf->len > 0)
 	{
+		char tel_mac[24] = {0};
+		char tel_meta[64] = {0};
+
+		if (decode_tel_response(buf->data,
+								buf->len,
+								tel_mac,
+								sizeof(tel_mac),
+								tel_meta,
+								sizeof(tel_meta)))
+		{
+			char tin[20] = {0};
+			char batt[20] = {0};
+			char *comma = strchr(tel_meta, ',');
+
+			if (comma)
+			{
+				size_t tin_len = (size_t)(comma - tel_meta);
+				if (tin_len >= sizeof(tin))
+				{
+					tin_len = sizeof(tin) - 1;
+				}
+
+				memcpy(tin, tel_meta, tin_len);
+				tin[tin_len] = '\0';
+
+				strncpy(batt, comma + 1, sizeof(batt) - 1);
+				batt[sizeof(batt) - 1] = '\0';
+
+				APP_LOG("[+]res,%s,%s,%s\n", tel_mac, tin, batt);
+			}
+			else
+			{
+				APP_LOG("[+]res,%s,%s\n", tel_mac, tel_meta);
+			}
+
+			return;
+		}
+
 		if (should_print)
 		{
 			APP_LOG("Response text: ");
@@ -1084,6 +1176,62 @@ static void response_cb(struct bt_le_ext_adv *adv,
 				synced_devices[i].last_response_time = k_uptime_get();
 
 				// If we parsed an ID, store it in this slot
+
+				// Only print debug for the device we sent a command to
+				if (active_command_mac[0] != '\0' &&
+					strcmp(synced_devices[idx].address, active_command_mac) == 0)
+				{
+					char dbg_mac[24] = {0};
+					char dbg_meta[64] = {0};
+
+					// try without offset first, then with +1
+					bool decoded = decode_tel_response(buf->data, buf->len,
+													   dbg_mac, sizeof(dbg_mac),
+													   dbg_meta, sizeof(dbg_meta));
+					if (!decoded && buf->len > 1)
+					{
+						decoded = decode_tel_response(buf->data + 1, buf->len - 1,
+													  dbg_mac, sizeof(dbg_mac),
+													  dbg_meta, sizeof(dbg_meta));
+					}
+
+					if (decoded)
+					{
+						char dbg_tin[20] = {0};
+						char dbg_batt[20] = {0};
+						char *comma = strchr(dbg_meta, ',');
+						if (comma)
+						{
+							size_t tin_len = (size_t)(comma - dbg_meta);
+							if (tin_len >= sizeof(dbg_tin))
+								tin_len = sizeof(dbg_tin) - 1;
+							memcpy(dbg_tin, dbg_meta, tin_len);
+							dbg_tin[tin_len] = '\0';
+							strncpy(dbg_batt, comma + 1, sizeof(dbg_batt) - 1);
+							APP_LOG("[+]DEBUG MAC=%s TIN=%s BATT=%s\n", dbg_mac, dbg_tin, dbg_batt);
+						}
+						else
+						{
+							APP_LOG("[+]DEBUG MAC=%s META=%s\n", dbg_mac, dbg_meta);
+						}
+					}
+					else
+					{
+						// decode failed - print raw as text skipping non-printable
+						char text_buf[64] = {0};
+						int ti = 0;
+						for (size_t j = 0; j < buf->len && ti < 63; j++)
+						{
+							char c = buf->data[j];
+							if (c >= 0x20 && c <= 0x7E)
+								text_buf[ti++] = c;
+						}
+						text_buf[ti] = '\0';
+						APP_LOG("[+]DEBUG RAW=%s\n", text_buf);
+						APP_LOG("[+]DEBUG HINT: protobuf mismatch - fix command.options and regenerate\n");
+					}
+				}
+
 				if (parsed_dev_id[0] != '\0')
 				{
 					// strncpy(synced_devices[i].device_id,
@@ -1641,7 +1789,7 @@ int main(void)
 
 		APP_LOG("PAST sent\n");
 		// k_sleep(K_MSEC(500));
-		k_sleep(K_MSEC(1500));
+		k_sleep(K_MSEC(3000));
 		discover_params.uuid = &pawr_char_uuid.uuid;
 		discover_params.func = discover_func;
 		discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
@@ -1708,7 +1856,7 @@ int main(void)
 			clear_slot(slot_idx);
 			goto disconnect;
 		}
-		k_sleep(K_MSEC(800));
+		k_sleep(K_MSEC(2000));
 		// Mark initial "alive" timestamp for this slot
 		// synced_devices[slot_idx].last_update_time = k_uptime_get();
 		synced_devices[slot_idx].last_sync_time = k_uptime_get();
@@ -1722,8 +1870,7 @@ int main(void)
 
 		if (default_conn)
 		{
-			// k_sleep(K_MSEC(100));
-			k_sleep(K_MSEC(1200));
+			k_sleep(K_MSEC(4000));
 			err = bt_conn_disconnect(default_conn,
 									 BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 			if (err)

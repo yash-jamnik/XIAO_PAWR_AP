@@ -195,6 +195,9 @@ struct synced_device
 	int64_t last_update_time;
 	int64_t last_response_time;
 	int64_t last_sync_time;
+	bool active_check_pending;
+	uint8_t active_check_retry;
+	int64_t active_check_time;
 };
 
 static struct synced_device synced_devices[MAX_SYNCS];
@@ -437,8 +440,6 @@ static int send_command_to_synced_devices(struct bt_le_ext_adv *pawr_adv, const 
 	return 0;
 }
 
-
-
 static void format_mac_hex(const uint8_t *mac,
 						   char *out,
 						   size_t out_size)
@@ -458,110 +459,114 @@ static void format_mac_hex(const uint8_t *mac,
 // static bool bytes_decode_callback(...)
 
 static bool decode_tel_response(const uint8_t *data, size_t len,
-                                char *mac_out, size_t mac_out_size,
-                                char *meta_out, size_t meta_out_size)
+								char *mac_out, size_t mac_out_size,
+								char *meta_out, size_t meta_out_size)
 {
-    Command msg = Command_init_zero;
-    pb_istream_t stream = pb_istream_from_buffer(data, len);
+	Command msg = Command_init_zero;
+	pb_istream_t stream = pb_istream_from_buffer(data, len);
 
-    if (!pb_decode(&stream, Command_fields, &msg))
-        return false;
+	if (!pb_decode(&stream, Command_fields, &msg))
+		return false;
 
-    if (msg.which_cmd != Command_tel_res_tag)
-        return false;
+	if (msg.which_cmd != Command_tel_res_tag)
+		return false;
 
-    if (msg.cmd.tel_res.mac.size != 6)
-        return false;
+	if (msg.cmd.tel_res.mac.size != 6)
+		return false;
 
-    format_mac_hex(msg.cmd.tel_res.mac.bytes, mac_out, mac_out_size);
-    strncpy(meta_out, msg.cmd.tel_res.meta, meta_out_size - 1);
-    meta_out[meta_out_size - 1] = '\0';
+	format_mac_hex(msg.cmd.tel_res.mac.bytes, mac_out, mac_out_size);
+	strncpy(meta_out, msg.cmd.tel_res.meta, meta_out_size - 1);
+	meta_out[meta_out_size - 1] = '\0';
 
-    return true;
+	return true;
 }
 
 void encode_led_command_with_mac(uint8_t *mac)
 {
-    Command cmd = Command_init_zero;
-    cmd.request_id = 1;
-    cmd.which_cmd = Command_led_tag;
-    memcpy(cmd.cmd.led.mac.bytes, mac, 6);
-    cmd.cmd.led.mac.size = 6;
+	Command cmd = Command_init_zero;
+	cmd.request_id = 1;
+	cmd.which_cmd = Command_led_tag;
+	memcpy(cmd.cmd.led.mac.bytes, mac, 6);
+	cmd.cmd.led.mac.size = 6;
 
-    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
-    if (!pb_encode(&stream, Command_fields, &cmd)) {
-        APP_LOG("Encode failed\n");
-        proto_len = 0;
-        proto_command_active = false;
-        return;
-    }
-    proto_len = stream.bytes_written;
-    proto_command_active = true;
-    APP_LOG("Proto len: %d\n", (int)proto_len);
+	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+	if (!pb_encode(&stream, Command_fields, &cmd))
+	{
+		APP_LOG("Encode failed\n");
+		proto_len = 0;
+		proto_command_active = false;
+		return;
+	}
+	proto_len = stream.bytes_written;
+	proto_command_active = true;
+	APP_LOG("Proto len: %d\n", (int)proto_len);
 }
 
 void encode_join_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
 {
-    Command cmd = Command_init_zero;
-    cmd.request_id = 1;
-    cmd.which_cmd = Command_join_tag;
-    memcpy(cmd.cmd.join.mac.bytes, esl_mac, 6);
-    cmd.cmd.join.mac.size = 6;
-    memcpy(cmd.cmd.join.ots_mac.bytes, ots_mac, 6);
-    cmd.cmd.join.ots_mac.size = 6;
+	Command cmd = Command_init_zero;
+	cmd.request_id = 1;
+	cmd.which_cmd = Command_join_tag;
+	memcpy(cmd.cmd.join.mac.bytes, esl_mac, 6);
+	cmd.cmd.join.mac.size = 6;
+	memcpy(cmd.cmd.join.ots_mac.bytes, ots_mac, 6);
+	cmd.cmd.join.ots_mac.size = 6;
 
-    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
-    if (!pb_encode(&stream, Command_fields, &cmd)) {
-        APP_LOG("Join encode failed\n");
-        proto_len = 0;
-        proto_command_active = false;
-        return;
-    }
-    proto_len = stream.bytes_written;
-    proto_command_active = true;
-    APP_LOG("Join proto len: %d\n", (int)proto_len);
+	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+	if (!pb_encode(&stream, Command_fields, &cmd))
+	{
+		APP_LOG("Join encode failed\n");
+		proto_len = 0;
+		proto_command_active = false;
+		return;
+	}
+	proto_len = stream.bytes_written;
+	proto_command_active = true;
+	APP_LOG("Join proto len: %d\n", (int)proto_len);
 }
 
 void encode_ota_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
 {
-    Command cmd = Command_init_zero;
-    cmd.request_id = 1;
-    cmd.which_cmd = Command_ota_tag;
-    memcpy(cmd.cmd.ota.mac.bytes, esl_mac, 6);
-    cmd.cmd.ota.mac.size = 6;
-    memcpy(cmd.cmd.ota.ots_mac.bytes, ots_mac, 6);
-    cmd.cmd.ota.ots_mac.size = 6;
+	Command cmd = Command_init_zero;
+	cmd.request_id = 1;
+	cmd.which_cmd = Command_ota_tag;
+	memcpy(cmd.cmd.ota.mac.bytes, esl_mac, 6);
+	cmd.cmd.ota.mac.size = 6;
+	memcpy(cmd.cmd.ota.ots_mac.bytes, ots_mac, 6);
+	cmd.cmd.ota.ots_mac.size = 6;
 
-    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
-    if (!pb_encode(&stream, Command_fields, &cmd)) {
-        APP_LOG("OTA encode failed\n");
-        proto_len = 0;
-        proto_command_active = false;
-        return;
-    }
-    proto_len = stream.bytes_written;
-    proto_command_active = true;
-    APP_LOG("OTA proto len: %d\n", (int)proto_len);
+	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+	if (!pb_encode(&stream, Command_fields, &cmd))
+	{
+		APP_LOG("OTA encode failed\n");
+		proto_len = 0;
+		proto_command_active = false;
+		return;
+	}
+	proto_len = stream.bytes_written;
+	proto_command_active = true;
+	APP_LOG("OTA proto len: %d\n", (int)proto_len);
 }
 
 void encode_tel_command_with_mac(uint8_t *mac)
 {
-    Command cmd = Command_init_zero;
-    cmd.request_id = 1;
-    cmd.which_cmd = Command_tel_tag;
-    memcpy(cmd.cmd.tel.mac.bytes, mac, 6);
-    cmd.cmd.tel.mac.size = 6;
+	Command cmd = Command_init_zero;
+	cmd.request_id = 1;
+	cmd.which_cmd = Command_tel_tag;
+	memcpy(cmd.cmd.tel.mac.bytes, mac, 6);
+	cmd.cmd.tel.mac.size = 6;
 
-    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
-    if (!pb_encode(&stream, Command_fields, &cmd)) {
-        APP_LOG("TEL encode failed\n");
-        proto_len = 0;
-        proto_command_active = false;
-        return;
-    }
-    proto_len = stream.bytes_written;
-    proto_command_active = true;
-    APP_LOG("TEL proto len: %d\n", (int)proto_len);
+	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+	if (!pb_encode(&stream, Command_fields, &cmd))
+	{
+		APP_LOG("TEL encode failed\n");
+		proto_len = 0;
+		proto_command_active = false;
+		return;
+	}
+	proto_len = stream.bytes_written;
+	proto_command_active = true;
+	APP_LOG("TEL proto len: %d\n", (int)proto_len);
 }
 // Function to parse and handle commands
 static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
@@ -777,8 +782,10 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 
 		response_window_active = true;
 		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
-		snprintf(active_command_mac, sizeof(active_command_mac),
-				 "%s (random)", mac_str);
+		// snprintf(active_command_mac, sizeof(active_command_mac),
+		// 		 "%s (random)", mac_str);
+		strncpy(active_command_mac, mac_str, sizeof(active_command_mac) - 1);
+		active_command_mac[sizeof(active_command_mac) - 1] = '\0';
 		encode_tel_command_with_mac(mac);
 
 		APP_LOG("[+]TEL_PROTO_READY\n");
@@ -1074,7 +1081,27 @@ static void response_cb(struct bt_le_ext_adv *adv,
 	{
 		char tel_mac[24] = {0};
 		char tel_meta[64] = {0};
+		if (buf && buf->len > 3)
+		{
+			if (strncmp((char *)buf->data, "OK,", 3) == 0)
+			{
+				char *mac = (char *)buf->data + 3;
 
+				for (int i = 0; i < MAX_SYNCS; i++)
+				{
+					if (synced_devices[i].active &&
+						strcmp(mac, synced_devices[i].address) == 0)
+					{
+						synced_devices[i].last_response_time = k_uptime_get();
+						synced_devices[i].active_check_pending = false;
+						synced_devices[i].active_check_retry = 0;
+
+						APP_LOG("Recovered device %s\n", mac);
+						return;
+					}
+				}
+			}
+		}
 		if (decode_tel_response(buf->data,
 								buf->len,
 								tel_mac,
@@ -1082,6 +1109,10 @@ static void response_cb(struct bt_le_ext_adv *adv,
 								tel_meta,
 								sizeof(tel_meta)))
 		{
+			if (strcmp(tel_mac, active_command_mac) != 0)
+			{
+				return;
+			}
 			char tin[20] = {0};
 			char batt[20] = {0};
 			char *comma = strchr(tel_meta, ',');
@@ -1112,20 +1143,20 @@ static void response_cb(struct bt_le_ext_adv *adv,
 
 		if (should_print)
 		{
-			APP_LOG("Response text: ");
-			for (size_t i = 0; i < buf->len; i++)
-			{
-				char c = buf->data[i];
-				if (c == '\0')
-				{
-					break;
-				}
-				if (c >= 0x20 && c <= 0x7E)
-				{
-					APP_LOG("%c", c);
-				}
-			}
-			APP_LOG("\n");
+			// APP_LOG("Response text: ");
+			// for (size_t i = 0; i < buf->len; i++)
+			// {
+			// 	char c = buf->data[i];
+			// 	if (c == '\0')
+			// 	{
+			// 		break;
+			// 	}
+			// 	if (c >= 0x20 && c <= 0x7E)
+			// 	{
+			// 		APP_LOG("%c", c);
+			// 	}
+			// }
+			// APP_LOG("\n");
 		}
 		// APP_LOG("=== Device Response ===\n");
 		// APP_LOG("From: subevent %d, slot %d\n", info->subevent, info->response_slot);
@@ -1531,8 +1562,33 @@ void cleanup_inactive_slots(void)
 		// 1) Active but timed out? -> treat as disconnected and clear slot
 		if (synced_devices[i].active && !is_slot_responsive(i))
 		{
-			APP_LOG("Slot %d timed out, marking device as disconnected\n", i);
-			clear_slot(i); // This will print [+]DISCONNTED,<dev_id> and set active=false
+			if (!synced_devices[i].active_check_pending)
+			{
+				char cmd[64];
+
+				snprintf(cmd,
+						 sizeof(cmd),
+						 "ACTIVE,%s",
+
+						 synced_devices[i].address);
+
+				strncpy(current_command, cmd, CMD_BUF_SIZE - 1);
+				current_command[CMD_BUF_SIZE - 1] = '\0';
+
+				temp_command_active = true;
+				temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
+
+				response_window_active = true;
+				response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
+
+				synced_devices[i].active_check_pending = true;
+				synced_devices[i].active_check_retry = 0;
+				synced_devices[i].active_check_time = k_uptime_get();
+
+				APP_LOG("Sent ACTIVE check to %s\n",
+						synced_devices[i].address);
+			}
+
 			continue;
 		}
 

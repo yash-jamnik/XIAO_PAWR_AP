@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <zephyr/fs/nvs.h>
 #include "pb_decode.h"
+#include <zephyr/app_version.h>
 static struct nvs_fs fs;
 static char active_command_mac[BT_ADDR_STR_LEN] = {0};
 #define NVS_ID_MCUMGR_MODE 1
@@ -790,6 +791,16 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 
 		APP_LOG("[+]TEL_PROTO_READY\n");
 	}
+	else if (strcmp(cmd, "version") == 0 || strcmp(cmd, "ver") == 0)
+	{
+		APP_LOG("\n========== Firmware Version ==========\n");
+		APP_LOG("Version : %s\n", APP_VERSION_STRING);
+		// APP_LOG("Major   : %d\n", APP_VERSION_MAJOR);
+		// APP_LOG("Minor   : %d\n", APP_VERSION_MINOR);
+		// APP_LOG("Patch   : %d\n", APP_PATCHLEVEL);
+		// APP_LOG("Tweak   : %d\n", APP_VERSION_TWEAK);
+		APP_LOG("======================================\n");
+	}
 	else if (strcmp(cmd, "help") == 0)
 	{
 		APP_LOG("\nAvailable commands:\n");
@@ -807,6 +818,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		APP_LOG("  1234             - Send [+]join,1234 for a few seconds then revert\n");
 		APP_LOG("  [+]join,1234     - Same as above\n");
 		APP_LOG("  join,9999        - Same as above\n");
+		APP_LOG("  ver              - shows firmware version\n");
 		APP_LOG("Current command: '%s'\n\n", current_command);
 	}
 	else if (strlen(cmd) > 0)

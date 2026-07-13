@@ -9,13 +9,20 @@ message Command {
     OtaCommand ota = 4;
     TelCommand tel = 5;
     TelResponse tel_res = 6;
+    DefaultImageCommand default_image = 7;
+    ClearEpdCommand clear_epd = 8;
   }
 }
 
 message LedCommand {
   bytes mac = 1;
 }
-
+message DefaultImageCommand {
+  bytes mac = 1;
+}
+message ClearEpdCommand {
+  bytes mac = 1;
+}
 message JoinCommand {
   bytes mac = 1;
   bytes ots_mac = 2;

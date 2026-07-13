@@ -1,4 +1,6 @@
 LedCommand.mac max_size:6
+DefaultImageCommand.mac max_size:6
+ClearEpdCommand.mac max_size:6
 JoinCommand.mac max_size:6
 OtaCommand.mac max_size:6
 JoinCommand.ots_mac max_size:6

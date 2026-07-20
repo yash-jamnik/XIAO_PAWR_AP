@@ -1911,7 +1911,7 @@ int main(void)
 		APP_LOG("NVS initialization failed (err %d)\n", err);
 		return 0;
 	}
-	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart20));
+	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart30));
 	if (!device_is_ready(uart_dev))
 	{
 		APP_LOG("UART device not ready!\n");

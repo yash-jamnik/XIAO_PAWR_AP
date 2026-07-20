@@ -1,0 +1,12 @@
+# give 4mb to littlefs, and leave the rest for the application
+
+littlefs_storage:
+  address: 0x00000000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  end_address: 0x00400000
+  placement:
+    before:
+    - tfm_storage
+    - end
+  region: external_flash
+  size: 0x00400000

@@ -29,6 +29,9 @@
 #include <zephyr/fs/nvs.h>
 #include "pb_decode.h"
 #include <zephyr/app_version.h>
+
+static int target_response_subevent = -1;
+
 static struct nvs_fs fs;
 static char active_command_mac[BT_ADDR_STR_LEN] = {0};
 #define NVS_ID_MCUMGR_MODE 1
@@ -119,6 +122,22 @@ static int64_t last_onboard_time = 0;
 #define UART_BUF_SIZE 256
 #define CMD_BUF_SIZE 128
 
+static char active_cmd[PACKET_SIZE];
+static size_t active_cmd_len;
+
+void prepare_active_command(const char *mac)
+{
+	snprintf(active_cmd,
+			 sizeof(active_cmd),
+			 "ACTIVE,%s",
+			 mac);
+
+	active_cmd_len = strlen(active_cmd);
+
+	printk("Prepared PAwR command: %s (len=%d)\n",
+		   active_cmd,
+		   (int)active_cmd_len);
+}
 #define MAX_SYNCS (NUM_SUBEVENTS * NUM_RSP_SLOTS)
 #define SLOT_TIMEOUT_MS 45000 // 90 seconds
 #define INVALID_SLOT 0xFF
@@ -182,10 +201,17 @@ static int64_t temp_command_expiry_ms = 0;
 static bool response_window_active = false;
 static int64_t response_window_expiry_ms = 0;
 
+enum pawr_device_state
+{
+	PAWR_DEVICE_DISCONNECTED = 0,
+	PAWR_DEVICE_SYNCED,
+	PAWR_DEVICE_VERIFYING,
+};
 // Structure to store synced device information
 struct synced_device
 {
 	bool active;
+	enum pawr_device_state state;
 	uint8_t subevent;
 	uint8_t response_slot;
 
@@ -226,8 +252,8 @@ static bool is_slot_responsive(int slot_index)
 
 	if (diff > SLOT_TIMEOUT_MS)
 	{
-		APP_LOG("Slot %d lost device (no PAwR response for %lld ms)\n",
-				slot_index, diff);
+		// APP_LOG("Slot %d lost device (no PAwR response for %lld ms)\n",
+		// 		slot_index, diff);
 		return false;
 	}
 
@@ -237,6 +263,7 @@ static bool is_slot_responsive(int slot_index)
 // Clear a slot completely (only for errors/timeouts, not normal disconnect)
 static void clear_slot(int slot_index)
 {
+
 	if (synced_devices[slot_index].active)
 	{
 		APP_LOG("[+]DISCONNECTED,%s\n",
@@ -247,6 +274,7 @@ static void clear_slot(int slot_index)
 		}
 	}
 
+	synced_devices[slot_index].state = PAWR_DEVICE_DISCONNECTED;
 	synced_devices[slot_index].active = false;
 	synced_devices[slot_index].subevent = INVALID_SLOT;
 	synced_devices[slot_index].response_slot = INVALID_SLOT;
@@ -256,8 +284,14 @@ static void clear_slot(int slot_index)
 	synced_devices[slot_index].has_device_id = false;
 
 	synced_devices[slot_index].last_update_time = 0;
+	synced_devices[slot_index].last_response_time = 0;
+	synced_devices[slot_index].last_sync_time = 0;
+	synced_devices[slot_index].active_check_pending = false;
+	synced_devices[slot_index].active_check_retry = 0;
+	synced_devices[slot_index].active_check_time = 0;
+	synced_devices[slot_index].state = PAWR_DEVICE_DISCONNECTED;
 
-	APP_LOG("Cleared slot %d\n", slot_index);
+	// APP_LOG("Cleared slot %d\n", slot_index);
 }
 // Same as clear_slot but without DISCONNTED log
 static void clear_slot_silent(int slot_index)
@@ -269,7 +303,7 @@ static void clear_slot_silent(int slot_index)
 			num_synced--;
 		}
 	}
-
+	synced_devices[slot_index].state = PAWR_DEVICE_DISCONNECTED;
 	synced_devices[slot_index].active = false;
 	synced_devices[slot_index].subevent = INVALID_SLOT;
 	synced_devices[slot_index].response_slot = INVALID_SLOT;
@@ -278,6 +312,12 @@ static void clear_slot_silent(int slot_index)
 	memset(synced_devices[slot_index].device_id, 0, sizeof(synced_devices[slot_index].device_id));
 	synced_devices[slot_index].has_device_id = false;
 	synced_devices[slot_index].last_update_time = 0;
+	synced_devices[slot_index].last_response_time = 0;
+	synced_devices[slot_index].last_sync_time = 0;
+	synced_devices[slot_index].active_check_pending = false;
+	synced_devices[slot_index].active_check_retry = 0;
+	synced_devices[slot_index].active_check_time = 0;
+	synced_devices[slot_index].state = PAWR_DEVICE_DISCONNECTED;
 
 	APP_LOG("Cleared slot %d (silent)\n", slot_index);
 }
@@ -324,6 +364,7 @@ static int find_or_assign_slot(const char *address, uint8_t *subevent, uint8_t *
 			synced_devices[i].address[sizeof(synced_devices[i].address) - 1] = '\0';
 
 			synced_devices[i].active = true;
+			synced_devices[i].state = PAWR_DEVICE_SYNCED;
 			synced_devices[i].subevent = *subevent;
 			synced_devices[i].response_slot = *response_slot;
 			synced_devices[i].last_update_time = k_uptime_get();
@@ -452,7 +493,6 @@ static void format_mac_hex(const uint8_t *mac,
 			 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-
 static bool decode_tel_response(const uint8_t *data, size_t len,
 								char *mac_out, size_t mac_out_size,
 								char *meta_out, size_t meta_out_size)
@@ -536,7 +576,6 @@ void encode_clear_command_with_mac(uint8_t *mac)
 	proto_command_active = true;
 	APP_LOG("CLEAR proto len: %d\n", (int)proto_len);
 }
-
 
 void encode_join_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
 {
@@ -645,7 +684,15 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 
 		temp_command_active = true;
 		temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
-
+		for (int i = 0; i < MAX_SYNCS; i++)
+		{
+			if (synced_devices[i].active &&
+				strcmp(synced_devices[i].address, esl_mac_str) == 0)
+			{
+				synced_devices[i].state = PAWR_DEVICE_VERIFYING;
+				break;
+			}
+		}
 		encode_join_command_with_mac(esl_mac, ots_mac);
 
 		if (proto_command_active && proto_len > 0)
@@ -745,7 +792,6 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		response_window_active = true;
 		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
 
-		// 🔥 THIS IS THE MAIN CHANGE
 		encode_led_command_with_mac(mac);
 
 		APP_LOG("[+]LED_PROTO_READY\n");
@@ -771,10 +817,8 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		response_window_active = true;
 		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
 
-		// 🔥 THIS IS THE MAIN CHANGE
 		encode_splash_command_with_mac(mac);
 		APP_LOG("[+]SPLASH_PROTO_READY\n");
-
 	}
 	else if (strncmp(cmd, "[+]clear,", 9) == 0)
 	{
@@ -797,7 +841,8 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		response_window_active = true;
 		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
 
-		// 🔥 THIS IS THE MAIN CHANGE
+		//  THIS IS THE MAIN CHANGE
+
 		encode_clear_command_with_mac(mac);
 		APP_LOG("[+]CLEAR_PROTO_READY\n");
 	}
@@ -843,7 +888,6 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		response_window_active = true;
 		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
 
-		// 🔥 THIS IS THE MAIN CHANGE
 		encode_ota_command_with_mac(esl_mac, ots_mac);
 
 		APP_LOG("[+]OTA_PROTO_READY\n");
@@ -876,6 +920,20 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		encode_tel_command_with_mac(mac);
 
 		APP_LOG("[+]TEL_PROTO_READY\n");
+	}
+	else if (strncmp(cmd, "[+]active,", 10) == 0)
+	{
+		const char *mac = cmd + 10;
+
+		prepare_active_command(mac);
+
+		temp_command_active = true;
+		temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
+
+		response_window_active = true;
+		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
+
+		APP_LOG("[+]ACTIVE READY\n");
 	}
 	else if (strcmp(cmd, "version") == 0 || strcmp(cmd, "ver") == 0)
 	{
@@ -1076,6 +1134,10 @@ static void request_cb(struct bt_le_ext_adv *adv,
 	// Handle temporary command expiry
 	update_temp_command_state();
 	update_response_window_state();
+	// APP_LOG("REQUEST_CB: temp=%d proto=%d current='%s'\n",
+	// 		temp_command_active,
+	// 		proto_command_active,
+	// 		current_command);
 
 	// Local copy of command
 	char cmd_local[CMD_BUF_SIZE];
@@ -1097,6 +1159,7 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 		if (proto_command_active && proto_len > 0)
 		{
+			// APP_LOG("TX PROTO len=%d\n", proto_len);
 			size_t copy_len = MIN(proto_len, PACKET_SIZE);
 
 			memcpy(buf->data, proto_buf, copy_len);
@@ -1110,13 +1173,14 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 			if (temp_command_active)
 			{
-				msg = current_command;
+				msg = active_cmd;
 			}
 			else
 			{
 				msg = "CHECK_DEVICE";
 			}
 
+			// APP_LOG("TX TEXT: '%s'\n", msg);
 			size_t len = strlen(msg);
 
 			memcpy(buf->data, msg, len);
@@ -1193,14 +1257,24 @@ static void response_cb(struct bt_le_ext_adv *adv,
 		{
 			if (strncmp((char *)buf->data, "OK,", 3) == 0)
 			{
-				char *mac = (char *)buf->data + 3;
+				char mac[BT_ADDR_LE_STR_LEN] = {0};
+
+				memcpy(mac, buf->data + 3, buf->len - 3);
+				mac[buf->len - 3] = '\0';
+
+				printk("RX MAC='%s'\n", mac);
 
 				for (int i = 0; i < MAX_SYNCS; i++)
 				{
-					if (synced_devices[i].active &&
-						strcmp(mac, synced_devices[i].address) == 0)
+					if (!synced_devices[i].active)
+						continue;
+
+					if (strncmp(mac, synced_devices[i].address, 17) == 0)
 					{
+						printk("MATCH FOUND!\n");
+
 						synced_devices[i].last_response_time = k_uptime_get();
+						synced_devices[i].state = PAWR_DEVICE_SYNCED;
 						synced_devices[i].active_check_pending = false;
 						synced_devices[i].active_check_retry = 0;
 
@@ -1208,6 +1282,8 @@ static void response_cb(struct bt_le_ext_adv *adv,
 						return;
 					}
 				}
+
+				printk("NO MATCH FOUND\n");
 			}
 		}
 		if (decode_tel_response(buf->data,
@@ -1541,7 +1617,7 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	memset(name, 0, sizeof(name));
 	bt_data_parse(ad, data_cb, name);
 
-	if (strcmp(name, "PAwR sync sample"))
+	if (strcmp(name, "PAWR_SYNC_SAMPLE"))
 		return;
 
 	/* Controller cooldown protection */
@@ -1637,12 +1713,41 @@ void display_synced_devices_status(void)
 	{
 		if (synced_devices[i].active)
 		{
-			APP_LOG("Device %d: mac %s, dev_id %s, subevent %d, slot %d\n",
+
+			const char *state;
+
+			switch (synced_devices[i].state)
+			{
+			case PAWR_DEVICE_SYNCED:
+				state = "SYNCED";
+				break;
+
+			case PAWR_DEVICE_VERIFYING:
+				state = "VERIFYING";
+				break;
+
+			default:
+				state = "DISCONNECTED";
+				break;
+			}
+			active_count++;
+			APP_LOG("Device %d: mac %s, dev_id %s, subevent %d, slot %d, state=%s\n",
 					i,
 					synced_devices[i].address,
-					synced_devices[i].has_device_id ? synced_devices[i].device_id : "na",
+					synced_devices[i].device_id,
 					synced_devices[i].subevent,
-					synced_devices[i].response_slot);
+					synced_devices[i].response_slot,
+					state);
+		}
+		else
+		{
+			if (k_uptime_get() - synced_devices[i].active_check_time > 3000)
+			{
+				// APP_LOG("ACTIVE check timed out for %s\n",
+				// 		synced_devices[i].address);
+
+				clear_slot(i);
+			}
 		}
 	}
 
@@ -1659,8 +1764,10 @@ void display_synced_devices_status(void)
 
 void cleanup_inactive_slots(void)
 {
+
 	for (int i = 0; i < MAX_SYNCS; i++)
 	{
+
 		// 1) Active but timed out? -> treat as disconnected and clear slot
 		if (synced_devices[i].active && !is_slot_responsive(i))
 		{
@@ -1678,10 +1785,10 @@ void cleanup_inactive_slots(void)
 				current_command[CMD_BUF_SIZE - 1] = '\0';
 
 				temp_command_active = true;
-				temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
+				temp_command_expiry_ms = k_uptime_get() + 10000;
 
 				response_window_active = true;
-				response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
+				response_window_expiry_ms = k_uptime_get() + 10000;
 
 				synced_devices[i].active_check_pending = true;
 				synced_devices[i].active_check_retry = 0;
@@ -1690,7 +1797,25 @@ void cleanup_inactive_slots(void)
 				APP_LOG("Sent ACTIVE check to %s\n",
 						synced_devices[i].address);
 			}
+			else
+			{
+				APP_LOG("ACTIVE pending: elapsed=%lld\n",
+						k_uptime_get() - synced_devices[i].active_check_time);
+				APP_LOG("RESPONSE_WINDOW_TIMEOUT_MS=%d\n",
+						RESPONSE_WINDOW_TIMEOUT_MS);
+				if (k_uptime_get() - synced_devices[i].active_check_time >
+					RESPONSE_WINDOW_TIMEOUT_MS)
+				{
+					APP_LOG("ACTIVE timeout -> clearing slot %d\n", i);
 
+					clear_slot(i);
+				}
+			}
+			APP_LOG("slot=%d active=%d pending=%d retry=%d\n",
+					i,
+					synced_devices[i].active,
+					synced_devices[i].active_check_pending,
+					synced_devices[i].active_check_retry);
 			continue;
 		}
 
@@ -1792,16 +1917,13 @@ int main(void)
 		APP_LOG("UART device not ready!\n");
 		return 0;
 	}
-
 	for (int i = 0; i < MAX_SYNCS; i++)
 	{
-		synced_devices[i].active = false;
+		memset(&synced_devices[i], 0, sizeof(synced_devices[i]));
+
 		synced_devices[i].subevent = INVALID_SLOT;
 		synced_devices[i].response_slot = INVALID_SLOT;
-		synced_devices[i].address[0] = '\0';
-		synced_devices[i].device_id[0] = '\0';
-		synced_devices[i].has_device_id = false;
-		synced_devices[i].last_update_time = 0;
+		synced_devices[i].state = PAWR_DEVICE_DISCONNECTED;
 	}
 
 	uint8_t flag = 0;
@@ -2038,7 +2160,18 @@ int main(void)
 			}
 		}
 
-		k_sem_take(&sem_disconnected, K_FOREVER);
+		if (k_sem_take(&sem_disconnected, K_SECONDS(5)))
+		{
+			APP_LOG("Disconnect timeout\n");
+
+			if (default_conn)
+			{
+				bt_conn_unref(default_conn);
+				default_conn = NULL;
+			}
+
+			continue;
+		}
 		// k_sleep(K_MSEC(400));
 		k_sleep(K_MSEC(1200));
 	}

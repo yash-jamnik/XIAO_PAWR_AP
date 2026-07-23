@@ -2156,7 +2156,11 @@ int main(void)
 			if (err)
 			{
 				APP_LOG("Disconnect failed (err %d)\n", err);
-				return 0;
+				bt_conn_unref(default_conn);
+				default_conn = NULL;
+				atomic_set(&onboarding_busy, 0);
+				k_sleep(K_MSEC(200));
+				continue;
 			}
 		}
 

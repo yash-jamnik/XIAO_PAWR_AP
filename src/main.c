@@ -1617,7 +1617,7 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	memset(name, 0, sizeof(name));
 	bt_data_parse(ad, data_cb, name);
 
-	if (strcmp(name, "PAWR_SYNC_SAMPLE"))
+	if (strcmp(name, "PAwR sync sample"))
 		return;
 
 	/* Controller cooldown protection */

@@ -115,8 +115,8 @@ void test_proto(void)
 static atomic_t onboarding_busy = ATOMIC_INIT(0);
 static int64_t last_onboard_time = 0;
 
-#define NUM_RSP_SLOTS 5
-#define NUM_SUBEVENTS 8
+#define NUM_RSP_SLOTS 8
+#define NUM_SUBEVENTS 12
 #define PACKET_SIZE 30
 #define NAME_LEN 30
 #define UART_BUF_SIZE 256

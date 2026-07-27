@@ -646,9 +646,8 @@ void encode_tel_command_with_mac(uint8_t *mac)
 // Function to parse and handle commands
 static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 {
-	APP_LOG("=== PROCESSING COMMAND ===\n");
-	APP_LOG("Command received: '%s' (length: %d)\n", cmd, (int)strlen(cmd));
-	APP_LOG("Current command before: '%s'\n", current_command);
+	 
+	 APP_LOG("CMD: '%s'\n", cmd);
 
 	if (strncmp(cmd, "[+]join,", 8) == 0)
 	{
@@ -1031,9 +1030,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		}
 	}
 
-	APP_LOG("Current command after processing: '%s'\n", current_command);
-	APP_LOG("Temp command active: %s\n", temp_command_active ? "true" : "false");
-	APP_LOG("=== COMMAND PROCESSING COMPLETE ===\n");
+    APP_LOG("CMD: '%s'\n", cmd);
 }
 
 void join_command_thread(void *pawr_adv_ptr, void *unused1, void *unused2)
@@ -1115,13 +1112,37 @@ static void request_cb(struct bt_le_ext_adv *adv,
 {
 	if (atomic_get(&onboarding_busy))
 	{
-		// Still send command, but disable responses
+		update_temp_command_state();
+		update_response_window_state();
+
+		char cmd_local[CMD_BUF_SIZE];
+		strncpy(cmd_local, current_command, CMD_BUF_SIZE - 1);
+		cmd_local[CMD_BUF_SIZE - 1] = '\0';
+		size_t cmd_len = strlen(cmd_local);
+
 		for (size_t i = 0; i < NUM_SUBEVENTS; i++)
 		{
+			struct net_buf_simple *buf = &bufs[i];
+			memset(buf->data, 0, PACKET_SIZE);
+
+			if (proto_command_active && proto_len > 0)
+			{
+				size_t copy_len = MIN(proto_len, PACKET_SIZE);
+				memcpy(buf->data, proto_buf, copy_len);
+				buf->len = copy_len;
+			}
+			else
+			{
+				size_t len = MIN(cmd_len, PACKET_SIZE - 1);
+				memcpy(buf->data, cmd_local, len);
+				buf->data[len] = '\0';
+				buf->len = len + 1;
+			}
+
 			subevent_data_params[i].subevent = i;
 			subevent_data_params[i].response_slot_start = 0;
-			subevent_data_params[i].response_slot_count = 0; // no responses
-			subevent_data_params[i].data = &bufs[i];
+			subevent_data_params[i].response_slot_count = 0; // still no responses while onboarding
+			subevent_data_params[i].data = buf;
 		}
 
 		bt_le_per_adv_set_subevent_data(adv, NUM_SUBEVENTS, subevent_data_params);
@@ -1480,8 +1501,8 @@ static void response_cb(struct bt_le_ext_adv *adv,
 		}
 		else
 		{
-			APP_LOG("Response from unknown slot (subevent %d, response_slot %d)\n",
-					info->subevent, info->response_slot);
+			// APP_LOG("Response from unknown slot (subevent %d, response_slot %d)\n",
+			// 		info->subevent, info->response_slot);
 		}
 		// APP_LOG("\n");
 
@@ -1708,60 +1729,23 @@ void display_synced_devices_status(void)
 {
 	int active_count = 0;
 
-	APP_LOG("\n=== Current Synced Devices ===\n");
 	for (int i = 0; i < MAX_SYNCS; i++)
 	{
 		if (synced_devices[i].active)
 		{
-
-			const char *state;
-
-			switch (synced_devices[i].state)
-			{
-			case PAWR_DEVICE_SYNCED:
-				state = "SYNCED";
-				break;
-
-			case PAWR_DEVICE_VERIFYING:
-				state = "VERIFYING";
-				break;
-
-			default:
-				state = "DISCONNECTED";
-				break;
-			}
 			active_count++;
-			APP_LOG("Device %d: mac %s, dev_id %s, subevent %d, slot %d, state=%s\n",
-					i,
-					synced_devices[i].address,
-					synced_devices[i].device_id,
-					synced_devices[i].subevent,
-					synced_devices[i].response_slot,
-					state);
 		}
 		else
 		{
 			if (k_uptime_get() - synced_devices[i].active_check_time > 3000)
 			{
-				// APP_LOG("ACTIVE check timed out for %s\n",
-				// 		synced_devices[i].address);
-
 				clear_slot(i);
 			}
 		}
 	}
 
-	if (active_count == 0)
-	{
-		APP_LOG("No devices currently synced\n");
-	}
-	else
-	{
-		APP_LOG("Total active devices: %d\n", active_count);
-	}
-	APP_LOG("============================\n\n");
+	APP_LOG("Synced devices: %d\n", active_count);
 }
-
 void cleanup_inactive_slots(void)
 {
 

@@ -115,8 +115,8 @@ void test_proto(void)
 static atomic_t onboarding_busy = ATOMIC_INIT(0);
 static int64_t last_onboard_time = 0;
 
-#define NUM_RSP_SLOTS 8
-#define NUM_SUBEVENTS 12
+#define NUM_RSP_SLOTS 10
+#define NUM_SUBEVENTS 15
 #define PACKET_SIZE 30
 #define NAME_LEN 30
 #define UART_BUF_SIZE 256
@@ -156,17 +156,17 @@ static struct bt_uuid_128 pawr_char_uuid =
 static uint16_t pawr_attr_handle;
 
 static const struct bt_le_per_adv_param per_adv_params = {
-	.interval_min = 0x400,
-	.interval_max = 0x400,
+	.interval_min = 0xC00,
+	.interval_max = 0xC00,
 	.options = 0,
 	.num_subevents = NUM_SUBEVENTS,
-	.subevent_interval = 0x50,
+	.subevent_interval = 0xA0,
 	.response_slot_delay = 0x10,
-	.response_slot_spacing = 0x40,
+	.response_slot_spacing = 0x20,
 	.num_response_slots = NUM_RSP_SLOTS,
 };
 
-#define JOIN_THREAD_STACK_SIZE 1024
+#define JOIN_THREAD_STACK_SIZE 2048
 #define JOIN_THREAD_PRIORITY 5
 K_THREAD_STACK_DEFINE(join_thread_stack, JOIN_THREAD_STACK_SIZE);
 
@@ -1638,7 +1638,7 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	memset(name, 0, sizeof(name));
 	bt_data_parse(ad, data_cb, name);
 
-	if (strcmp(name, "PAwR sync sample"))
+	if (strcmp(name, "PAWR_SYNC_SAMPLE"))
 		return;
 
 	/* Controller cooldown protection */
@@ -1860,7 +1860,7 @@ void restart_advertising(void)
 		APP_LOG("Extended advertising restartedr\n");
 	}
 }
-#define MAINT_THREAD_STACK_SIZE 1024
+#define MAINT_THREAD_STACK_SIZE 2048
 #define MAINT_THREAD_PRIORITY 6
 K_THREAD_STACK_DEFINE(maint_thread_stack, MAINT_THREAD_STACK_SIZE);
 static struct k_thread maint_thread_data;

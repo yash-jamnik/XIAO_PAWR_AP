@@ -1287,7 +1287,6 @@ static void response_cb(struct bt_le_ext_adv *adv,
 					   copy_len);
 
 				mac[copy_len] = '\0';
-				mac[buf->len - 3] = '\0';
 
 				printk("RX MAC='%s'\n", mac);
 

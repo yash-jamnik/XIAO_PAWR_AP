@@ -646,8 +646,8 @@ void encode_tel_command_with_mac(uint8_t *mac)
 // Function to parse and handle commands
 static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 {
-	 
-	 APP_LOG("CMD: '%s'\n", cmd);
+
+	APP_LOG("CMD: '%s'\n", cmd);
 
 	if (strncmp(cmd, "[+]join,", 8) == 0)
 	{
@@ -1030,7 +1030,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		}
 	}
 
-    APP_LOG("CMD: '%s'\n", cmd);
+	APP_LOG("CMD: '%s'\n", cmd);
 }
 
 void join_command_thread(void *pawr_adv_ptr, void *unused1, void *unused2)
@@ -1280,7 +1280,13 @@ static void response_cb(struct bt_le_ext_adv *adv,
 			{
 				char mac[BT_ADDR_LE_STR_LEN] = {0};
 
-				memcpy(mac, buf->data + 3, buf->len - 3);
+				size_t copy_len = MIN(buf->len - 3, sizeof(mac) - 1);
+
+				memcpy(mac,
+					   buf->data + 3,
+					   copy_len);
+
+				mac[copy_len] = '\0';
 				mac[buf->len - 3] = '\0';
 
 				printk("RX MAC='%s'\n", mac);
@@ -1638,7 +1644,7 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	memset(name, 0, sizeof(name));
 	bt_data_parse(ad, data_cb, name);
 
-	if (strcmp(name, "PAWR_SYNC_SAMPLE"))
+	if (strcmp(name, "PAwR sync sample"))
 		return;
 
 	/* Controller cooldown protection */
@@ -1681,6 +1687,8 @@ static uint8_t discover_func(struct bt_conn *conn, const struct bt_gatt_attr *at
 
 	if (!attr)
 	{
+		APP_LOG("Characteristic not found");
+		k_sem_give(&sem_discovered);
 		return BT_GATT_ITER_STOP;
 	}
 
@@ -1883,9 +1891,9 @@ int main(void)
 {
 	APP_LOG("APPLICATION STARTED 2\n");
 	int err;
-	struct bt_gatt_discover_params discover_params;
-	struct bt_gatt_write_params write_params;
-	struct pawr_timing sync_config;
+	static struct bt_gatt_discover_params discover_params;
+	static struct bt_gatt_write_params write_params;
+	static struct pawr_timing sync_config;
 
 	init_bufs();
 	// NVS initialization
@@ -2044,6 +2052,8 @@ int main(void)
 			continue;
 		}
 		k_sleep(K_MSEC(300));
+		if (!default_conn)
+			goto disconnect;
 		err = bt_le_per_adv_set_info_transfer(pawr_adv, default_conn, 0);
 		if (err)
 		{
@@ -2054,12 +2064,16 @@ int main(void)
 		APP_LOG("PAST sent\n");
 		// k_sleep(K_MSEC(500));
 		k_sleep(K_MSEC(3000));
+		memset(&discover_params, 0, sizeof(discover_params));
 		discover_params.uuid = &pawr_char_uuid.uuid;
 		discover_params.func = discover_func;
 		discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
 		discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
 		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 
+		if (!default_conn)
+			goto disconnect;
+		pawr_attr_handle = 0;
 		err = bt_gatt_discover(default_conn, &discover_params);
 		if (err)
 		{
@@ -2073,6 +2087,11 @@ int main(void)
 		if (err)
 		{
 			APP_LOG("Timed out during GATT discovery\n");
+			goto disconnect;
+		}
+		if (pawr_attr_handle == 0)
+		{
+			APP_LOG("Characteristic not found");
 			goto disconnect;
 		}
 
@@ -2096,13 +2115,15 @@ int main(void)
 
 		sync_config.subevent = subevent;
 		sync_config.response_slot = response_slot;
-
+		memset(&write_params, 0, sizeof(write_params));
 		write_params.func = write_func;
 		write_params.handle = pawr_attr_handle;
 		write_params.offset = 0;
 		write_params.data = &sync_config;
 		write_params.length = sizeof(sync_config);
 
+		if (!default_conn)
+			goto disconnect;
 		err = bt_gatt_write(default_conn, &write_params);
 		if (err)
 		{
@@ -2140,8 +2161,6 @@ int main(void)
 			if (err)
 			{
 				APP_LOG("Disconnect failed (err %d)\n", err);
-				bt_conn_unref(default_conn);
-				default_conn = NULL;
 				atomic_set(&onboarding_busy, 0);
 				k_sleep(K_MSEC(200));
 				continue;

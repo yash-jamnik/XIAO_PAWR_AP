@@ -122,22 +122,6 @@ static int64_t last_onboard_time = 0;
 #define UART_BUF_SIZE 256
 #define CMD_BUF_SIZE 128
 
-static char active_cmd[PACKET_SIZE];
-static size_t active_cmd_len;
-
-void prepare_active_command(const char *mac)
-{
-	snprintf(active_cmd,
-			 sizeof(active_cmd),
-			 "ACTIVE,%s",
-			 mac);
-
-	active_cmd_len = strlen(active_cmd);
-
-	printk("Prepared PAwR command: %s (len=%d)\n",
-		   active_cmd,
-		   (int)active_cmd_len);
-}
 #define MAX_SYNCS (NUM_SUBEVENTS * NUM_RSP_SLOTS)
 #define SLOT_TIMEOUT_MS 45000 // 90 seconds
 #define INVALID_SLOT 0xFF
@@ -924,7 +908,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 	{
 		const char *mac = cmd + 10;
 
-		prepare_active_command(mac);
+		snprintf(current_command, CMD_BUF_SIZE, "ACTIVE,%s", mac);
 
 		temp_command_active = true;
 		temp_command_expiry_ms = k_uptime_get() + TEMP_CMD_DURATION_MS;
@@ -1194,7 +1178,7 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 			if (temp_command_active)
 			{
-				msg = active_cmd;
+				msg = cmd_local;
 			}
 			else
 			{
@@ -1774,6 +1758,8 @@ void cleanup_inactive_slots(void)
 
 				strncpy(current_command, cmd, CMD_BUF_SIZE - 1);
 				current_command[CMD_BUF_SIZE - 1] = '\0';
+				proto_command_active = false;
+				proto_len = 0;
 
 				temp_command_active = true;
 				temp_command_expiry_ms = k_uptime_get() + 10000;
@@ -1999,7 +1985,7 @@ int main(void)
 		}
 		/* From here down, replace every `default_conn` with `conn` */
 
-		k_sleep(K_MSEC(300));
+		k_sleep(K_MSEC(150));
 
 		err = bt_le_per_adv_set_info_transfer(pawr_adv, conn, 0);   /* <<< CHANGE #2 */
 		if (err) {
@@ -2068,7 +2054,7 @@ int main(void)
 			goto disconnect;
 		}
 
-		k_sleep(K_MSEC(2000));
+		k_sleep(K_MSEC(500));
 		synced_devices[slot_idx].last_sync_time = k_uptime_get();
 		synced_devices[slot_idx].last_response_time = 0;
 
@@ -2079,7 +2065,7 @@ int main(void)
 		k_sleep(K_MSEC(per_adv_params.interval_max * 2));
 
 		if (conn) {                                                    /* <<< CHANGE #6 */
-			k_sleep(K_MSEC(4000));
+			k_sleep(K_MSEC(800));
 			err = bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 			if (err) {
 				APP_LOG("Disconnect failed (err %d)\n", err);
@@ -2108,7 +2094,7 @@ int main(void)
 			conn = NULL;
 		}
 
-		k_sleep(K_MSEC(1200));
+		k_sleep(K_MSEC(400));
 	}
 
 	/* ---- rest of function unchanged ---- */

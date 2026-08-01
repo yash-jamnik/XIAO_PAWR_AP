@@ -1,15 +1,3 @@
-
-
-/*
- * Copyright (c) 2023 Nordic Semiconductor ASA
- *
- * SPDX-License-Identifier: Apache-2.0
- */
-/*
- * Copyright (c) 2023 Nordic Semiconductor ASA
- *
- * SPDX-License-Identifier: Apache-2.0
- */
 #include "src/command.pb.h"
 #include "pb_encode.h"
 #include <zephyr/bluetooth/att.h>
@@ -29,14 +17,14 @@
 #include <zephyr/fs/nvs.h>
 #include "pb_decode.h"
 #include <zephyr/app_version.h>
+#include <zephyr/storage/flash_map.h>
 
-static int target_response_subevent = -1;
+// #define DEVICE_NAME "Internal_testing"
+#define DEVICE_NAME "PAwR sync sample"
 
 static struct nvs_fs fs;
 static char active_command_mac[BT_ADDR_STR_LEN] = {0};
 #define NVS_ID_MCUMGR_MODE 1
-
-#include <zephyr/storage/flash_map.h>
 
 static int nvs_init_app(void)
 {
@@ -367,50 +355,6 @@ static int find_or_assign_slot(const char *address, uint8_t *subevent, uint8_t *
 
 	APP_LOG("No available slot for device %s\n", address);
 	return -1; // No slot available
-}
-
-// UART polling function for reading commands (currently unused in main loop)
-static int uart_read_command(char *buffer, size_t buffer_size)
-{
-	static char rx_buffer[UART_BUF_SIZE];
-	static int rx_pos = 0;
-	uint8_t c;
-
-	int chars_read = 0;
-	while (uart_poll_in(uart_dev, &c) == 0 && chars_read < 50)
-	{
-		chars_read++;
-
-		if (c == '\n' || c == '\r')
-		{
-			if (rx_pos > 0)
-			{
-				rx_buffer[rx_pos] = '\0';
-				strncpy(buffer, rx_buffer, buffer_size - 1);
-				buffer[buffer_size - 1] = '\0';
-				APP_LOG("\nUART: Command received: '%s'\n", buffer);
-				rx_pos = 0;
-				return strlen(buffer);
-			}
-		}
-		else if (c == '\b' || c == 0x7F)
-		{
-			if (rx_pos > 0)
-			{
-				rx_pos--;
-				uart_poll_out(uart_dev, '\b');
-				uart_poll_out(uart_dev, ' ');
-				uart_poll_out(uart_dev, '\b');
-			}
-		}
-		else if (rx_pos < sizeof(rx_buffer) - 1 && c >= 0x20 && c <= 0x7E)
-		{
-			rx_buffer[rx_pos++] = c;
-			uart_poll_out(uart_dev, c);
-		}
-	}
-
-	return 0;
 }
 
 // Function to send command data to all synced devices (immediate push)
@@ -1231,19 +1175,6 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		APP_LOG("Active response subevent: %d\n", current_response_subevent);
 	}
 }
-static bool print_ad_field(struct bt_data *data, void *user_data)
-{
-	ARG_UNUSED(user_data);
-
-	APP_LOG("    0x%02X: ", data->type);
-	for (size_t i = 0; i < data->data_len; i++)
-	{
-		APP_LOG("%02X", data->data[i]);
-	}
-	APP_LOG("\n");
-
-	return true;
-}
 
 static struct bt_conn *default_conn;
 
@@ -1537,7 +1468,7 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 
 void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
-	APP_LOG("Disconnected, reason 0x%02X %s\n", reason, bt_hci_err_to_str(reason));
+	APP_LOG("Disconnected, reason 0x%02X %s\n\n", reason, bt_hci_err_to_str(reason));
 
 	if (conn)
 	{
@@ -1621,18 +1552,11 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 		type != BT_GAP_ADV_TYPE_ADV_DIRECT_IND)
 		return;
 
-	// if (rssi < -70)
-	// 	return;
-
 	memset(name, 0, sizeof(name));
 	bt_data_parse(ad, data_cb, name);
 
-	if (strcmp(name, "PAWR_SYNC_SAMPLE"))
+	if (strcmp(name, DEVICE_NAME))
 		return;
-
-	/* Controller cooldown protection */
-	// if (k_uptime_get() - last_onboard_time < ONBOARDING_COOLDOWN_MS)
-	// 	return;
 
 	if (!atomic_cas(&onboarding_busy, 0, 1))
 	{
@@ -1646,7 +1570,7 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	}
 
 	/* Allow controller to settle */
-	// k_sleep(K_MSEC(200));
+	k_sleep(K_MSEC(100));
 
 	err = bt_conn_le_create(addr,
 							BT_CONN_LE_CREATE_CONN,
@@ -1946,6 +1870,7 @@ int main(void)
 		}
 
 		if (!default_conn) {
+			APP_LOG("Start Scanning!!\n\n");
 			err = bt_le_scan_start(BT_LE_SCAN_PASSIVE_CONTINUOUS, device_found);
 		}
 		if (err && err != -EALREADY) {
@@ -1963,8 +1888,6 @@ int main(void)
 			}
 			atomic_set(&onboarding_busy, 0);
 			bt_le_scan_stop();
-			k_sleep(K_MSEC(200));
-			k_sleep(K_MSEC(500));
 			continue;
 		}
 
@@ -1976,7 +1899,6 @@ int main(void)
 		k_sched_lock();
 		conn = default_conn ? bt_conn_ref(default_conn) : NULL;
 		k_sched_unlock();
-
 		if (!conn) {
 			APP_LOG("Connection failed, retrying...\n");
 			atomic_set(&onboarding_busy, 0);
@@ -1985,7 +1907,7 @@ int main(void)
 		}
 		/* From here down, replace every `default_conn` with `conn` */
 
-		k_sleep(K_MSEC(150));
+		k_sleep(K_MSEC(300));
 
 		err = bt_le_per_adv_set_info_transfer(pawr_adv, conn, 0);   /* <<< CHANGE #2 */
 		if (err) {
@@ -1994,7 +1916,7 @@ int main(void)
 		}
 
 		APP_LOG("PAST sent\n");
-		k_sleep(K_MSEC(3000));
+		k_sleep(K_MSEC(100));
 
 		memset(&discover_params, 0, sizeof(discover_params));
 		discover_params.uuid = &pawr_char_uuid.uuid;
@@ -2054,7 +1976,6 @@ int main(void)
 			goto disconnect;
 		}
 
-		k_sleep(K_MSEC(500));
 		synced_devices[slot_idx].last_sync_time = k_uptime_get();
 		synced_devices[slot_idx].last_response_time = 0;
 
@@ -2062,10 +1983,9 @@ int main(void)
 				slot_idx, sync_config.subevent, sync_config.response_slot);
 
 	disconnect:
-		k_sleep(K_MSEC(per_adv_params.interval_max * 2));
-
+		k_sleep(K_MSEC(1000));
+		// k_sleep(K_MSEC(per_adv_params.interval_max * 2));
 		if (conn) {                                                    /* <<< CHANGE #6 */
-			k_sleep(K_MSEC(800));
 			err = bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 			if (err) {
 				APP_LOG("Disconnect failed (err %d)\n", err);
@@ -2093,8 +2013,6 @@ int main(void)
 			bt_conn_unref(conn);
 			conn = NULL;
 		}
-
-		k_sleep(K_MSEC(400));
 	}
 
 	/* ---- rest of function unchanged ---- */

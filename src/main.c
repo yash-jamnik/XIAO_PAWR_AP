@@ -1886,7 +1886,7 @@ int main(void)
 	err = nvs_init_app();
 	if (err) { APP_LOG("NVS initialization failed (err %d)\n", err); return 0; }
 
-	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart20));
+	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart30));
 	if (!device_is_ready(uart_dev)) { APP_LOG("UART device not ready!\n"); return 0; }
 
 	for (int i = 0; i < MAX_SYNCS; i++) {

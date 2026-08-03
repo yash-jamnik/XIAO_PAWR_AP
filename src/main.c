@@ -21,8 +21,8 @@
 
 /* Variable Declaration for Scanning Usage */
 // #define DEVICE_NAME "Internal_testing"
-#define DEVICE_NAME "TEST_SAMPLE"
-// #define DEVICE_NAME "PAwR sync sample"
+// #define DEVICE_NAME "TEST_SAMPLE"
+#define DEVICE_NAME "PAwR sync sample"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS     5
@@ -210,43 +210,6 @@ static bool name_matches(struct net_buf_simple *ad)
 
 	return ctx.match;
 }
-
-
-void test_proto(void)
-{
-	Command cmd = Command_init_zero;
-
-	// 🔹 Fill data
-	cmd.request_id = 1;
-	cmd.which_cmd = Command_led_tag;
-	// cmd.cmd.led = 123;
-
-	uint8_t buffer[30];
-
-	pb_ostream_t stream = pb_ostream_from_buffer(buffer, sizeof(buffer));
-
-	// 🔹 Encode
-	if (!pb_encode(&stream, Command_fields, &cmd))
-	{
-		APP_LOG("❌ Encode failed\n");
-		return;
-	}
-
-	size_t len = stream.bytes_written;
-
-	// 🔹 Print result
-	APP_LOG("✅ Encoded size: %d\n", (int)len);
-
-	APP_LOG("HEX: ");
-	for (int i = 0; i < len; i++)
-	{
-		APP_LOG("%02X ", buffer[i]);
-	}
-	APP_LOG("\n");
-	// 🔹 Optional: store globally for later PAwR use
-}
-
-#define ONBOARDING_COOLDOWN_MS 3000
 
 static atomic_t onboarding_busy = ATOMIC_INIT(0);
 static int64_t last_onboard_time = 0;
@@ -1586,20 +1549,17 @@ int64_t endTime = 0;
 
 void connected_cb(struct bt_conn *conn, uint8_t err)
 {
-	// if (conn != default_conn) {
-	// 	APP_LOG("connected_cb: unexpected conn (ignored, not currently pending)\n");
-	// 	return;
-	// }
-
 	if (err) { 
 		APP_LOG("Connection failed (err 0x%02X), elapsed %lld ms\n",
 				err, endTime - startTime);
 
 		bt_conn_unref(default_conn);
 		default_conn = NULL;
+	
+		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
 
-		atomic_set(&onboarding_busy, 0);
-		k_sem_give(&sem_connected);
+		// atomic_set(&onboarding_busy, 0);
+		// k_sem_give(&sem_connected);
 		return;		
 	} 
 
@@ -1609,7 +1569,9 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 		APP_LOG("Failed to allocate address copy, aborting handoff\n");
 		bt_conn_unref(default_conn);
 		default_conn = NULL;
-		k_sem_give(&sem_connected);
+		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
+
+		// k_sem_give(&sem_connected);
 		return;
 	}
 
@@ -1766,55 +1728,6 @@ static void flush_results_to_queue(void)
 	scan_result_count = 0;
 
 	k_mutex_unlock(&results_mutex);
-}
-
-static void device_found_copy(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
-						struct net_buf_simple *ad)
-{
-	char name[NAME_LEN];
-	int err;
-
-	/* Prevent multiple onboarding at once */
-	if (atomic_get(&onboarding_busy))
-		return;
-
-	if (default_conn)
-		return;
-
-	if (type != BT_GAP_ADV_TYPE_ADV_IND &&
-		type != BT_GAP_ADV_TYPE_ADV_DIRECT_IND)
-		return;
-
-	memset(name, 0, sizeof(name));
-	bt_data_parse(ad, data_cb, name);
-
-	if (strcmp(name, DEVICE_NAME))
-		return;
-
-	if (!atomic_cas(&onboarding_busy, 0, 1))
-	{
-		return;
-	}
-
-	if (bt_le_scan_stop())
-	{
-		atomic_set(&onboarding_busy, 0);
-		return;
-	}
-
-	/* Allow controller to settle */
-	k_sleep(K_MSEC(100));
-
-	err = bt_conn_le_create(addr,
-							BT_CONN_LE_CREATE_CONN,
-							BT_LE_CONN_PARAM_DEFAULT,
-							&default_conn);
-
-	if (err)
-	{
-		APP_LOG("Create conn failed (%u)\n", err);
-		atomic_set(&onboarding_busy, 0);
-	}
 }
 
 static uint8_t discover_func(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -2063,7 +1976,7 @@ void gatt_thread(void *p1, void *p2, void *p3){
 	char addr_str[BT_ADDR_LE_STR_LEN];
 	int err;
 	while(1){
-	int ret = k_msgq_get(&scan_result_msgq, &item, K_FOREVER);
+		int ret = k_msgq_get(&scan_result_msgq, &item, K_FOREVER);
 		if (ret == 0) {
 			bt_addr_le_to_str(&item.addr, addr_str, sizeof(addr_str));
 			APP_LOG("Consumed: %s  RSSI: %d  (queue remaining: %d)\n",
@@ -2077,11 +1990,6 @@ void gatt_thread(void *p1, void *p2, void *p3){
 								BT_CONN_LE_CREATE_CONN,
 								&my_conn_param,
 								&default_conn);
-											
-			// err = bt_conn_le_create(&item.addr,
-			// 					BT_CONN_LE_CREATE_CONN,
-			// 					BT_LE_CONN_PARAM_DEFAULT,
-			// 					&default_conn);
 
 			if (err) {
 				/* Case 1: immediate failure — device unreachable, invalid, etc.
@@ -2124,6 +2032,10 @@ void gatt_thread(void *p1, void *p2, void *p3){
 			if (k_sem_take(&sem_disconnected, K_SECONDS(30)) != 0) {
 				APP_LOG("Disconnect confirmation timeout for %s — proceeding anyway\n", addr_str);
 			}
+
+			if (k_msgq_num_used_get(&scan_result_msgq) == 0) {
+				k_sem_give(&scan_restart_sem);
+			}
 		}
 	}
 }
@@ -2159,6 +2071,8 @@ void write_disconnect(void *p1, void *p2, void *p3)
 		APP_LOG("Connection did not reach CONNECTED state in time\n");
 		bt_conn_unref(default_conn);
 		default_conn = NULL;
+
+		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
 	}
 
 	/* ---- STEP 1: PAST ---- */
@@ -2185,7 +2099,7 @@ void write_disconnect(void *p1, void *p2, void *p3)
 
 		err = bt_gatt_discover(default_conn, &discover_params);
 		if (err) {
-			APP_LOG("Discovery start failed for %s (err %d)\n", addr_str, err);
+			APP_LOG("Discovery start failed for %s (err %d)\n", addr_str, err);			
 			proceed = false;
 		} else if (k_sem_take(&sem_discovered, K_SECONDS(10)) != 0) {
 			APP_LOG("Discovery timed out for %s\n", addr_str);

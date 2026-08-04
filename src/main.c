@@ -21,8 +21,8 @@
 
 /* Variable Declaration for Scanning Usage */
 // #define DEVICE_NAME "Internal_testing"
-// #define DEVICE_NAME "TEST_SAMPLE"
-#define DEVICE_NAME "PAwR sync sample"
+#define DEVICE_NAME "TEST_SAMPLE"
+// #define DEVICE_NAME "PAwR sync sample"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS     5
@@ -40,6 +40,8 @@ static const struct bt_le_conn_param my_conn_param = {
 	.latency      = 0,
 	.timeout      = 100,      /* 4000 ms supervision timeout (400 * 10ms) */
 };
+
+static struct bt_conn *default_conn;
 
 static struct scan_result_t scan_results[MAX_SCAN_RESULTS];
 static uint8_t scan_result_count;
@@ -1280,8 +1282,6 @@ static void request_cb(struct bt_le_ext_adv *adv,
 	}
 }
 
-static struct bt_conn *default_conn;
-
 static void response_cb(struct bt_le_ext_adv *adv,
 						struct bt_le_per_adv_response_info *info,
 						struct net_buf_simple *buf)
@@ -1561,7 +1561,7 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 		// atomic_set(&onboarding_busy, 0);
 		// k_sem_give(&sem_connected);
 		return;		
-	} 
+	}
 
 	/* --- Spawn write_disconnect thread, handing off ownership --- */
 	bt_addr_le_t *addr_copy = k_malloc(sizeof(bt_addr_le_t));
@@ -1635,12 +1635,6 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 			}
 		}
 	}
-
-	// if (default_conn)
-	// {
-	// 	bt_conn_unref(default_conn);
-	// 	default_conn = NULL;
-	// }
 
 	/* release onboarding lock */
 	last_onboard_time = k_uptime_get();
@@ -1934,8 +1928,14 @@ void scan_thread(void *p1, void *p2, void *p3){
 	k_mutex_init(&results_mutex);
 
 	while(1){
+	   /* Don't scan if all slots are already allocated */
+		if (num_synced >= MAX_SYNCS) {
+			APP_LOG("%s : All %d slots full, pausing scan\n", thread_name, MAX_SYNCS);
+			k_sleep(K_SECONDS(2));   /* check again periodically */
+			continue;
+		}
+	
 		bool queue_empty = (k_msgq_num_used_get(&scan_result_msgq) == 0);
-
 		if (!queue_empty) {
 			/* Block here until either queue drains or someone forces a restart */
 			k_sem_take(&scan_restart_sem, K_FOREVER);

@@ -2069,10 +2069,22 @@ void write_disconnect(void *p1, void *p2, void *p3)
 
 	if (!wait_for_connected_state(default_conn, CONN_WAIT_TIMEOUT_MS)) {
 		APP_LOG("Connection did not reach CONNECTED state in time\n");
-		bt_conn_unref(default_conn);
-		default_conn = NULL;
 
+		if (default_conn != NULL) {
+			/* Attempt disconnect regardless of state — safe no-op if already
+			* disconnected, but necessary if still mid-connecting/stuck */
+			int derr = bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+			if (derr) {
+				APP_LOG("Disconnect call failed for %s (err %d) — likely already down\n",
+						addr_str, derr);
+			}
+			bt_conn_unref(default_conn);
+			default_conn = NULL;
+		}
+
+		k_free(addr);                      /* <<< also missing — you leak addr otherwise */
 		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
+		return;                            /* <<< THE MISSING LINE — thread ends here */
 	}
 
 	/* ---- STEP 1: PAST ---- */
@@ -2282,9 +2294,9 @@ int main(void)
 					join_command, pawr_adv, NULL, NULL,
 					JOIN_THREAD_PRIORITY, 0, K_NO_WAIT);
 
-	// k_thread_create(&main_thread_data, main_thread_stack, MAIN_THREAD_STACK_SIZE,
-	// 				main_thread, NULL, NULL, NULL,
-	// 				MAIN_THREAD_PRIORITY, 0, K_NO_WAIT);
+	k_thread_create(&main_thread_data, main_thread_stack, MAIN_THREAD_STACK_SIZE,
+					main_thread, NULL, NULL, NULL,
+					MAIN_THREAD_PRIORITY, 0, K_NO_WAIT);
 
 	while(1){
 		k_sleep(K_SECONDS(5));

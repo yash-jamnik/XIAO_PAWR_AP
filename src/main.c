@@ -25,7 +25,7 @@
 // #define DEVICE_NAME "PAwR sync sample"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
-#define MAX_SCAN_RESULTS     5
+#define MAX_SCAN_RESULTS     10
 #define SCAN_WINDOW_SECONDS   10
 
 /* ---- Result storage ---- */
@@ -72,7 +72,7 @@ K_THREAD_STACK_DEFINE(wdisc_thread_stack, WDISC_THREAD_STACK_SIZE);
 struct k_thread wdisc_thread_data;
 
 #define MAIN_THREAD_STACK_SIZE 2048
-#define MAIN_THREAD_PRIORITY 6
+#define MAIN_THREAD_PRIORITY 5
 K_THREAD_STACK_DEFINE(main_thread_stack, MAIN_THREAD_STACK_SIZE);
 static struct k_thread main_thread_data;
 
@@ -1557,9 +1557,6 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 		default_conn = NULL;
 	
 		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
-
-		// atomic_set(&onboarding_busy, 0);
-		// k_sem_give(&sem_connected);
 		return;		
 	}
 
@@ -1570,8 +1567,6 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 		bt_conn_unref(default_conn);
 		default_conn = NULL;
 		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
-
-		// k_sem_give(&sem_connected);
 		return;
 	}
 
@@ -1580,21 +1575,16 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 	bt_addr_le_to_str(addr_copy, addr_str, sizeof(addr_str));
 	APP_LOG("Connected CB : connection established for %s\n", addr_str);
 	
-	// Unreference the default_conn and pass to other.
-	// struct bt_conn *conn_ref = bt_conn_ref(conn);   /* thread's own reference */
-	// bt_conn_unref(default_conn);                     /* release the original */
-	// default_conn = NULL;                              /* free up global immediately */
-
 	k_tid_t tid = k_thread_create(&wdisc_thread_data,
 								wdisc_thread_stack,
 								WDISC_THREAD_STACK_SIZE,
-								write_disconnect,   /* thread entry function */
-								addr_copy,          /* p1 */
-								NULL,           /* p2 */
-								NULL,               /* p3 */
+								write_disconnect, 		  	/* thread entry function */
+								addr_copy,        		  	/* p1 */
+								NULL,           			/* p2 */
+								NULL,             		  	/* p3 */
 								WDISC_THREAD_PRIORITY,
-								0,                  /* options */
-								K_NO_WAIT);          /* start immediately */
+								0,                		 	/* options */
+								K_NO_WAIT);       		   	/* start immediately */
 
 	k_thread_name_set(tid, "wdisc");
 
@@ -1603,6 +1593,16 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 
 void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
+	if (reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
+	    reason == BT_HCI_ERR_LOCALHOST_TERM_CONN) {
+			/* graceful, expected */
+	} else if (reason == BT_HCI_ERR_CONN_TIMEOUT) {
+		APP_LOG("Supervision timeout for this device — link dropped abnormally\n");
+		/* consider: mark this MAC for a longer backoff/cooldown before
+		 * scan_thread re-attempts a connect, since the controller may
+		 * need time to release resources internally */
+	}
+
     char addr_str[BT_ADDR_LE_STR_LEN];
     const bt_addr_le_t *dev_addr = bt_conn_get_dst(conn);
 	
@@ -1647,8 +1647,6 @@ void remote_info_available_cb(struct bt_conn *conn, struct bt_conn_remote_info *
 {
 	APP_LOG("Remote info available\n");   /* add this to correlate timing in your log */
 	k_sem_give(&sem_remote_info);
-
-	// k_sem_give(&sem_connected);
 }
 
 BT_CONN_CB_DEFINE(conn_cb) = {
@@ -1656,24 +1654,6 @@ BT_CONN_CB_DEFINE(conn_cb) = {
 	.disconnected = disconnected_cb,
 	.remote_info_available = remote_info_available_cb,
 };
-
-static bool data_cb(struct bt_data *data, void *user_data)
-{
-	char *name = user_data;
-	uint8_t len;
-
-	switch (data->type)
-	{
-	case BT_DATA_NAME_SHORTENED:
-	case BT_DATA_NAME_COMPLETE:
-		len = MIN(data->data_len, NAME_LEN - 1);
-		memcpy(name, data->data, len);
-		name[len] = '\0';
-		return false;
-	default:
-		return true;
-	}
-}
 
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 						struct net_buf_simple *ad){
@@ -1922,15 +1902,15 @@ void scan_thread(void *p1, void *p2, void *p3){
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
-	const char *thread_name = "SCAN_THREAD";
-	APP_LOG("%s :  Scanning Thread Started \n",thread_name);
+	const char *tag_name = "SCAN_THREAD";
+	APP_LOG("%s :  Scanning Thread Started \n",tag_name);
 	scanning_enabled = true;
 	k_mutex_init(&results_mutex);
 
 	while(1){
 	   /* Don't scan if all slots are already allocated */
 		if (num_synced >= MAX_SYNCS) {
-			APP_LOG("%s : All %d slots full, pausing scan\n", thread_name, MAX_SYNCS);
+			APP_LOG("%s : All %d slots full, pausing scan\n", tag_name, MAX_SYNCS);
 			k_sleep(K_SECONDS(2));   /* check again periodically */
 			continue;
 		}
@@ -1947,18 +1927,18 @@ void scan_thread(void *p1, void *p2, void *p3){
 
 		int err = bt_le_scan_start(BT_LE_SCAN_PASSIVE_CONTINUOUS, device_found);
 		if (err) {
-			APP_LOG("%s :  bt_le_scan_start failed (err %d) \n",thread_name, err);
+			APP_LOG("%s :  bt_le_scan_start failed (err %d) \n",tag_name, err);
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
 
-		APP_LOG("%s : Scan window started (%ds max, 20 devices max) \n",thread_name, SCAN_WINDOW_SECONDS);
+		APP_LOG("%s : Scan window started (%ds max, 20 devices max) \n",tag_name, SCAN_WINDOW_SECONDS);
 
 		/* Wait for either: 20 devices found, or 5s timeout */
 		k_sem_take(&scan_done_sem, K_SECONDS(SCAN_WINDOW_SECONDS));
 		scanning_enabled = false;
 		bt_le_scan_stop();
-		APP_LOG("%s :Scan window ended, %d device(s) collected\n", thread_name, scan_result_count);
+		APP_LOG("%s :Scan window ended, %d device(s) collected\n", tag_name, scan_result_count);
 
 		if (scan_result_count > 0) {
 			flush_results_to_queue();
@@ -2023,7 +2003,6 @@ void gatt_thread(void *p1, void *p2, void *p3){
 				was never spawned in this case since connected_cb only
 				spawns it on the success path. */
 				APP_LOG("Connection to %s failed (handled in connected_cb)\n", addr_str);
-				APP_LOG("Restart with new id ");
 				k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
 				continue;
 			}
@@ -2280,8 +2259,6 @@ int main(void)
 		APP_LOG("Application Initialised Failed \n \n");		
 	}
 
-	int err;
-
 	k_thread_create(&scan_thread_data, scan_thread_stack, SCAN_THREAD_STACK_SIZE,
 					scan_thread, NULL, NULL, NULL,
 					SCAN_THREAD_PRIORITY, 0, K_NO_WAIT);
@@ -2299,7 +2276,6 @@ int main(void)
 					MAIN_THREAD_PRIORITY, 0, K_NO_WAIT);
 
 	while(1){
-		k_sleep(K_SECONDS(5));
 		static int status_counter = 0;
 		if (++status_counter >= 12) {
 			status_counter = 0;
@@ -2309,161 +2285,6 @@ int main(void)
 		}
 		cleanup_inactive_slots();
 		k_sleep(K_SECONDS(5));
-	}
-
-	static struct bt_gatt_discover_params discover_params;
-	static struct bt_gatt_write_params write_params;
-	static struct pawr_timing sync_config;
-	struct bt_conn *conn = NULL;   /* <<< ADD: local per-iteration reference */
-
-	while (num_synced < MAX_SYNCS)
-	{
-		err = 0;
-
-		if (num_synced >= MAX_SYNCS) {
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
-
-		/* Will not Required, since scanning once for 3 second */
-		/*
-		
-		if (k_sem_take(&sem_connected, K_SECONDS(6)) != 0) {
-			APP_LOG("Connection wait timeout → recovering...\n");
-
-			if (default_conn) {
-				bt_conn_unref(default_conn);
-				default_conn = NULL;
-			}
-			atomic_set(&onboarding_busy, 0);
-			bt_le_scan_stop();
-			continue;
-		}
-		
-		*/
-		/* ============================================================
-		* <<< CHANGE #1 — take the local reffed copy right here,
-		* immediately after sem_connected succeeds. This is the ONLY
-		* place you grab it for the whole iteration.
-		* ============================================================ */
-		k_sched_lock();
-		conn = default_conn ? bt_conn_ref(default_conn) : NULL;
-		k_sched_unlock();
-
-		if (!conn) {
-			APP_LOG("Connection failed, retrying...\n");
-			atomic_set(&onboarding_busy, 0);
-			k_sleep(K_MSEC(200));
-			continue;
-		}
-		/* From here down, replace every `default_conn` with `conn` */
-
-		k_sleep(K_MSEC(300));
-
-		err = bt_le_per_adv_set_info_transfer(pawr_adv, conn, 0);   /* <<< CHANGE #2 */
-		if (err) {
-			APP_LOG("Failed to send PAST (err %d)\n", err);
-			goto disconnect;
-		}
-
-		APP_LOG("PAST sent\n");
-		k_sleep(K_MSEC(100));
-
-		memset(&discover_params, 0, sizeof(discover_params));
-		discover_params.uuid = &pawr_char_uuid.uuid;
-		discover_params.func = discover_func;
-		discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
-		discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
-		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
-
-		pawr_attr_handle = 0;
-		err = bt_gatt_discover(conn, &discover_params);              /* <<< CHANGE #3 */
-		if (err) {
-			APP_LOG("Discovery failed (err %d)\n", err);
-			goto disconnect;
-		}
-
-		APP_LOG("Discovery started\n");
-
-		err = k_sem_take(&sem_discovered, K_SECONDS(10));
-		if (err) { APP_LOG("Timed out during GATT discovery\n"); goto disconnect; }
-		if (pawr_attr_handle == 0) { APP_LOG("Characteristic not found"); goto disconnect; }
-
-		char addr_str[BT_ADDR_LE_STR_LEN] = {0};
-		const bt_addr_le_t *dev_addr = bt_conn_get_dst(conn);        /* <<< CHANGE #4 (no null check needed, conn is guaranteed valid) */
-		if (dev_addr) {
-			bt_addr_le_to_str(dev_addr, addr_str, sizeof(addr_str));
-		}
-
-		uint8_t subevent = 0, response_slot = 0;
-		int slot_idx = find_or_assign_slot(addr_str, &subevent, &response_slot);
-		if (slot_idx < 0) {
-			APP_LOG("No slot available for device %s\n", addr_str);
-			goto disconnect;
-		}
-
-		sync_config.subevent = subevent;
-		sync_config.response_slot = response_slot;
-		memset(&write_params, 0, sizeof(write_params));
-		write_params.func = write_func;
-		write_params.handle = pawr_attr_handle;
-		write_params.offset = 0;
-		write_params.data = &sync_config;
-		write_params.length = sizeof(sync_config);
-
-		err = bt_gatt_write(conn, &write_params);                     /* <<< CHANGE #5 */
-		if (err) {
-			APP_LOG("Write failed (err %d)\n", err);
-			clear_slot(slot_idx);
-			goto disconnect;
-		}
-
-		APP_LOG("Write started\n");
-
-		err = k_sem_take(&sem_written, K_SECONDS(10));
-		if (err) {
-			APP_LOG("Timed out during GATT write\n");
-			clear_slot(slot_idx);
-			goto disconnect;
-		}
-
-		synced_devices[slot_idx].last_sync_time = k_uptime_get();
-		synced_devices[slot_idx].last_response_time = 0;
-
-		APP_LOG("PAwR config written to sync %d (subevent %d, slot %d), disconnecting\n",
-				slot_idx, sync_config.subevent, sync_config.response_slot);
-
-	disconnect:
-		k_sleep(K_MSEC(1000));
-		// k_sleep(K_MSEC(per_adv_params.interval_max * 2));
-		if (conn) {                                                    /* <<< CHANGE #6 */
-			err = bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-			if (err) {
-				APP_LOG("Disconnect failed (err %d)\n", err);
-				atomic_set(&onboarding_busy, 0);
-				bt_conn_unref(conn);          /* <<< CHANGE #7 — release local ref before continue */
-				conn = NULL;
-				k_sleep(K_MSEC(200));
-				continue;
-			}
-		}
-
-		if (k_sem_take(&sem_disconnected, K_SECONDS(5))) {
-			APP_LOG("Disconnect timeout\n");
-			if (conn) {                                                /* <<< CHANGE #8 */
-				bt_conn_unref(conn);
-				conn = NULL;
-			}
-			continue;
-		}
-
-		/* <<< CHANGE #9 — always release your local ref at the end of
-		* a successful iteration, whether via the normal path or via
-		* `disconnect:` fallthrough */
-		if (conn) {
-			bt_conn_unref(conn);
-			conn = NULL;
-		}
 	}
 
 	/* ---- rest of function unchanged ---- */
@@ -2482,18 +2303,6 @@ int main(void)
 		}
 	}
 	APP_LOG("============================\n\n");
-
-	while (1) {
-		k_sleep(K_SECONDS(5));
-		static int status_counter = 0;
-		if (++status_counter >= 12) {
-			status_counter = 0;
-			APP_LOG("System status: %d synced devices active, waiting for commands...\n", num_synced);
-			APP_LOG("Current command: %s | temp_active: %s\n", current_command,
-					temp_command_active ? "true" : "false");
-		}
-		cleanup_inactive_slots();
-	}
 
 	return 0;
 }

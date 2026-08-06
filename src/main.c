@@ -21,8 +21,8 @@
 
 /* Variable Declaration for Scanning Usage */
 // #define DEVICE_NAME "Internal_testing"
-#define DEVICE_NAME "TEST_SAMPLE"
-// #define DEVICE_NAME "PAwR sync sample"
+// #define DEVICE_NAME "TEST_SAMPLE"
+#define DEVICE_NAME "PAwR sync sample"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS     10
@@ -1604,7 +1604,8 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 
 		bt_conn_unref(conn);
 		conn = NULL;
-	
+		
+		k_sem_give(&sem_connected);
 		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
 		return;		
 	}
@@ -1622,6 +1623,7 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
         bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
         bt_conn_unref(conn);
         conn = NULL;
+		k_sem_give(&sem_connected);      /* wake gatt_thread NOW, not after 10s */
         k_sem_give(&sem_disconnected);
         return;
     }
@@ -1687,8 +1689,6 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 	/* release onboarding lock */
 	last_onboard_time = k_uptime_get();
 	atomic_set(&onboarding_busy, 0);
-
-	// k_sem_give(&sem_disconnected);
 }
 
 void remote_info_available_cb(struct bt_conn *conn, struct bt_conn_remote_info *remote_info)
@@ -2022,7 +2022,7 @@ void gatt_thread(void *p1, void *p2, void *p3){
 			}
 
 			/* Case 2: wait for connected_cb to resolve (success OR failure) */
-			// k_sem_reset(&sem_connected);
+			k_sem_reset(&sem_connected);
 			int wret = k_sem_take(&sem_connected, K_SECONDS(10));
 
 			if (wret != 0) {
@@ -2104,6 +2104,8 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 	} else {
 		APP_LOG("PAST sent for %s\n", addr_str);
 	}
+
+	k_sem_give(&sem_disconnected);
 	/* ---- STEP 2: GATT DISCOVER ---- */
 	if (proceed) {
 		atomic_inc(&active_onboarding_count);   /* <-- ADD: open all subevent windows now */
@@ -2232,10 +2234,8 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 	self->conn = NULL;
 
 	APP_LOG("wdisc worker %d: finished for %s\n", self->id, addr_str);
-	k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
+	// k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
 }
-
-
 
 void wdisc_worker_thread(void *p1, void *p2, void *p3)
 {

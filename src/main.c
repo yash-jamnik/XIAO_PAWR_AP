@@ -34,14 +34,16 @@ struct scan_result_t {
 	int8_t       rssi;
 };
 
+static atomic_t active_onboarding_count = ATOMIC_INIT(0);
+
 static const struct bt_le_conn_param my_conn_param = {
 	.interval_min = 0x0006,   /* 7.5 ms  (0x0006 * 1.25ms) - minimum allowed */
 	.interval_max = 0x0006,   /* 7.5 ms */
 	.latency      = 0,
-	.timeout      = 100,      /* 4000 ms supervision timeout (400 * 10ms) */
+	.timeout      = 400,      /* 4000 ms supervision timeout (400 * 10ms) */
 };
 
-static struct bt_conn *default_conn;
+// static struct bt_conn *default_conn;
 
 static struct scan_result_t scan_results[MAX_SCAN_RESULTS];
 static uint8_t scan_result_count;
@@ -52,7 +54,34 @@ K_SEM_DEFINE(scan_done_sem, 0, 1);     /* signaled when 20 found, or on timeout 
 K_SEM_DEFINE(scan_restart_sem, 0, 1);  /* external trigger to force a rescan */
 K_SEM_DEFINE(sem_remote_info, 0, 1);
 
+// Worker Thread
+struct wdisc_job {
+    bt_addr_le_t     addr;
+    struct bt_conn  *conn;   /* ref already held from bt_conn_le_create */
+};
+
+#define WDISC_QUEUE_LEN 16
+K_MSGQ_DEFINE(wdisc_job_q, sizeof(struct wdisc_job), WDISC_QUEUE_LEN, 4);
 K_MSGQ_DEFINE(scan_result_msgq, sizeof(struct scan_result_t), MAX_SCAN_RESULTS, 4);
+
+#define WDISC_POOL_SIZE 5      /* start here */
+#define WDISC_POOL_MAX  10     /* ceiling you can bump to */
+
+struct wdisc_worker {
+    int id;
+    struct k_thread thread;
+    k_tid_t tid;
+
+    struct bt_conn *conn;                       /* conn this worker is currently handling */
+
+    struct bt_gatt_discover_params discover_params;
+    struct bt_gatt_write_params    write_params;
+
+    struct k_sem sem_discovered;
+    struct k_sem sem_written;
+    struct k_sem sem_remote_info;
+    uint16_t pawr_attr_handle;
+};
 
 /* Thread Declarations */
 static bool scanning_enabled = false;
@@ -81,6 +110,10 @@ static struct k_thread main_thread_data;
 K_THREAD_STACK_DEFINE(join_thread_stack, JOIN_THREAD_STACK_SIZE);
 struct k_thread join_thread_data;
 
+K_THREAD_STACK_ARRAY_DEFINE(wdisc_stacks, WDISC_POOL_MAX, WDISC_THREAD_STACK_SIZE);
+static struct wdisc_worker wdisc_workers[WDISC_POOL_MAX];
+static int wdisc_pool_size;
+
 static K_SEM_DEFINE(sem_connected, 0, 1);
 static K_SEM_DEFINE(sem_discovered, 0, 1);
 static K_SEM_DEFINE(sem_written, 0, 1);
@@ -90,7 +123,14 @@ static struct nvs_fs fs;
 static char active_command_mac[BT_ADDR_STR_LEN] = {0};
 #define NVS_ID_MCUMGR_MODE 1
 
-void write_disconnect(void *p1, void *p2, void *p3);
+static struct bt_le_conn_param *fast_conn_param =
+	BT_LE_CONN_PARAM(0x0010, 0x0010, 0, 400); /* 20ms fixed interval, latency 0, 4s timeout */
+
+static struct bt_conn_le_create_param *fast_create_param =
+BT_CONN_LE_CREATE_PARAM(BT_CONN_LE_OPT_NONE,
+							BT_GAP_SCAN_FAST_INTERVAL,
+							BT_GAP_SCAN_FAST_INTERVAL);
+
 
 static int nvs_init_app(void)
 {
@@ -1544,6 +1584,15 @@ static const struct bt_le_ext_adv_cb adv_cb = {
 	.pawr_response = response_cb,
 };
 
+
+static bool conn_is_live(struct bt_conn *conn)
+{
+    if (!conn) return false;
+    struct bt_conn_info info;
+    if (bt_conn_get_info(conn, &info)) return false;
+    return info.state == BT_CONN_STATE_CONNECTED;
+}
+
 int64_t startTime = 0;
 int64_t endTime = 0;
 
@@ -1553,40 +1602,29 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 		APP_LOG("Connection failed (err 0x%02X), elapsed %lld ms\n",
 				err, endTime - startTime);
 
-		bt_conn_unref(default_conn);
-		default_conn = NULL;
+		bt_conn_unref(conn);
+		conn = NULL;
 	
 		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
 		return;		
 	}
 
-	/* --- Spawn write_disconnect thread, handing off ownership --- */
-	bt_addr_le_t *addr_copy = k_malloc(sizeof(bt_addr_le_t));
-	if (!addr_copy) {
-		APP_LOG("Failed to allocate address copy, aborting handoff\n");
-		bt_conn_unref(default_conn);
-		default_conn = NULL;
-		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
-		return;
-	}
+	struct wdisc_job job;
+    bt_addr_le_copy(&job.addr, bt_conn_get_dst(conn));
+    job.conn = conn; /* default_conn already holds the ref from bt_conn_le_create */
 
-	bt_addr_le_copy(addr_copy, bt_conn_get_dst(conn));
-	char addr_str[BT_ADDR_LE_STR_LEN];
-	bt_addr_le_to_str(addr_copy, addr_str, sizeof(addr_str));
-	APP_LOG("Connected CB : connection established for %s\n", addr_str);
-	
-	k_tid_t tid = k_thread_create(&wdisc_thread_data,
-								wdisc_thread_stack,
-								WDISC_THREAD_STACK_SIZE,
-								write_disconnect, 		  	/* thread entry function */
-								addr_copy,        		  	/* p1 */
-								NULL,           			/* p2 */
-								NULL,             		  	/* p3 */
-								WDISC_THREAD_PRIORITY,
-								0,                		 	/* options */
-								K_NO_WAIT);       		   	/* start immediately */
+    char addr_str[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(&job.addr, addr_str, sizeof(addr_str));
+    APP_LOG("Connected CB: connection established for %s\n", addr_str);
 
-	k_thread_name_set(tid, "wdisc");
+    if (k_msgq_put(&wdisc_job_q, &job, K_NO_WAIT) != 0) {
+        APP_LOG("wdisc queue full, dropping connection %s\n", addr_str);
+        bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        bt_conn_unref(conn);
+        conn = NULL;
+        k_sem_give(&sem_disconnected);
+        return;
+    }
 
 	k_sem_give(&sem_connected);
 }
@@ -1636,6 +1674,16 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 		}
 	}
 
+		/* NEW: wake the owning worker immediately, whichever wait it's in */
+	for (int i = 0; i < wdisc_pool_size; i++) {
+		if (wdisc_workers[i].conn == conn) {
+			k_sem_give(&wdisc_workers[i].sem_remote_info);
+			k_sem_give(&wdisc_workers[i].sem_discovered);
+			k_sem_give(&wdisc_workers[i].sem_written);
+			break;
+		}
+	}
+
 	/* release onboarding lock */
 	last_onboard_time = k_uptime_get();
 	atomic_set(&onboarding_busy, 0);
@@ -1645,8 +1693,12 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 
 void remote_info_available_cb(struct bt_conn *conn, struct bt_conn_remote_info *remote_info)
 {
-	APP_LOG("Remote info available\n");   /* add this to correlate timing in your log */
-	k_sem_give(&sem_remote_info);
+   for (int i = 0; i < wdisc_pool_size; i++) {
+        if (wdisc_workers[i].conn == conn) {
+            k_sem_give(&wdisc_workers[i].sem_remote_info);
+            return;
+        }
+    }
 }
 
 BT_CONN_CB_DEFINE(conn_cb) = {
@@ -1707,41 +1759,28 @@ static void flush_results_to_queue(void)
 static uint8_t discover_func(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 							struct bt_gatt_discover_params *params)
 {
-	struct bt_gatt_chrc *chrc;
-	char str[BT_UUID_STR_LEN];
+	struct wdisc_worker *self = CONTAINER_OF(params, struct wdisc_worker, discover_params);
 
-	APP_LOG("Discovery: attr %p\n", attr);
+	if (!attr) {
+        k_sem_give(&self->sem_discovered);
+        return BT_GATT_ITER_STOP;
+    }
 
-	if (!attr)
-	{
-		APP_LOG("Characteristic not found");
-		k_sem_give(&sem_discovered);
-		return BT_GATT_ITER_STOP;
-	}
-
-	chrc = (struct bt_gatt_chrc *)attr->user_data;
-	bt_uuid_to_str(chrc->uuid, str, sizeof(str));
-	APP_LOG("UUID %s\n", str);
-
-	if (!bt_uuid_cmp(chrc->uuid, &pawr_char_uuid.uuid))
-	{
-		pawr_attr_handle = chrc->value_handle;
-		APP_LOG("Characteristic handle: %d\n", pawr_attr_handle);
-		k_sem_give(&sem_discovered);
-	}
+    struct bt_gatt_chrc *chrc = (struct bt_gatt_chrc *)attr->user_data;
+    if (!bt_uuid_cmp(chrc->uuid, &pawr_char_uuid.uuid)) {
+        self->pawr_attr_handle = chrc->value_handle;
+        k_sem_give(&self->sem_discovered);
+    }
 
 	return BT_GATT_ITER_STOP;
 }
 
 static void write_func(struct bt_conn *conn, uint8_t err, struct bt_gatt_write_params *params)
 {
-	if (err)
-	{
-		APP_LOG("Write failed (err %d)\n", err);
-		return;
-	}
-
-	k_sem_give(&sem_written);
+    struct wdisc_worker *self = CONTAINER_OF(params, struct wdisc_worker, write_params);
+    if (!err) {
+        k_sem_give(&self->sem_written);
+    }
 }
 
 void init_bufs(void)
@@ -1902,6 +1941,7 @@ void scan_thread(void *p1, void *p2, void *p3){
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
+	
 	const char *tag_name = "SCAN_THREAD";
 	APP_LOG("%s :  Scanning Thread Started \n",tag_name);
 	scanning_enabled = true;
@@ -1965,17 +2005,19 @@ void gatt_thread(void *p1, void *p2, void *p3){
 
 			k_sem_reset(&sem_connected);		
 			k_sem_reset(&sem_disconnected);
-		
-			err = bt_conn_le_create(&item.addr,
-								BT_CONN_LE_CREATE_CONN,
-								&my_conn_param,
-								&default_conn);
 
+			// &my_conn_param,		
+			struct bt_conn *new_conn = NULL;
+
+			err = bt_conn_le_create(&item.addr,
+										fast_create_param,
+										fast_conn_param,
+										&new_conn);
 			if (err) {
 				/* Case 1: immediate failure — device unreachable, invalid, etc.
 				No connection attempt started, nothing to wait for. */
 				APP_LOG("Create conn failed for %s (%d): %s\n", addr_str, err, strerror(-err));
-				default_conn = NULL;
+				new_conn = NULL;
 				continue;   /* move straight to next queue item */
 			}
 
@@ -1986,19 +2028,19 @@ void gatt_thread(void *p1, void *p2, void *p3){
 			if (wret != 0) {
 				/* Timed out waiting for connected_cb at all — cancel it */
 				APP_LOG("Connect confirmation timeout for %s\n", addr_str);
-				if (default_conn) {
-					bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+				if (new_conn) {
+					bt_conn_disconnect(new_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 					/* wait briefly for cleanup, but don't hang forever if this
 					also doesn't resolve */
 					k_sem_take(&sem_disconnected, K_SECONDS(3));
 				}
-				default_conn = NULL;
+				new_conn = NULL;
 				continue;
 			}
 
-			if (default_conn == NULL) {
+			if (new_conn == NULL) {
 				/* connected_cb already handled the failure case internally:
-				it set default_conn = NULL when err != 0. Nothing more to do
+				it set new_conn = NULL when err != 0. Nothing more to do
 				here — just move to next device. write_disconnect thread
 				was never spawned in this case since connected_cb only
 				spawns it on the success path. */
@@ -2019,26 +2061,19 @@ void gatt_thread(void *p1, void *p2, void *p3){
 	}
 }
 
-void write_disconnect(void *p1, void *p2, void *p3)
+static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 {
-	ARG_UNUSED(p3);
-	ARG_UNUSED(p2);
-
-	bt_addr_le_t *addr = (bt_addr_le_t *)p1;
-	// struct bt_conn *conn = (struct bt_conn *)p2;
-
 	char addr_str[BT_ADDR_LE_STR_LEN];
-	bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
-	APP_LOG("write_disconnect thread started for %s\n", addr_str);
+	bt_addr_le_to_str(&job->addr, addr_str, sizeof(addr_str));
+	APP_LOG("wdisc worker %d: started for %s\n", self->id, addr_str);
 
-	k_sem_reset(&sem_remote_info);
-	if (k_sem_take(&sem_remote_info, K_SECONDS(10)) != 0) {
+	k_sem_reset(&self->sem_remote_info);
+	if (k_sem_take(&self->sem_remote_info, K_SECONDS(10)) != 0) {
 		APP_LOG("Remote info not available in time for %s, trying PAST anyway\n", addr_str);
 	}
 
-	if (!default_conn) {
+	if (!self->conn) {
 		APP_LOG("No active connection for %s — aborting\n", addr_str);
-		k_free(addr);
 		return;
 	}
 
@@ -2046,60 +2081,60 @@ void write_disconnect(void *p1, void *p2, void *p3)
 	bool proceed = true;
 	int slot_idx = -1;
 
-	if (!wait_for_connected_state(default_conn, CONN_WAIT_TIMEOUT_MS)) {
+	if (!wait_for_connected_state(self->conn, CONN_WAIT_TIMEOUT_MS)) {
 		APP_LOG("Connection did not reach CONNECTED state in time\n");
 
-		if (default_conn != NULL) {
-			/* Attempt disconnect regardless of state — safe no-op if already
-			* disconnected, but necessary if still mid-connecting/stuck */
-			int derr = bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-			if (derr) {
-				APP_LOG("Disconnect call failed for %s (err %d) — likely already down\n",
-						addr_str, derr);
-			}
-			bt_conn_unref(default_conn);
-			default_conn = NULL;
+		int derr = bt_conn_disconnect(self->conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		if (derr) {
+			APP_LOG("Disconnect call failed for %s (err %d) — likely already down\n",
+					addr_str, derr);
 		}
+		bt_conn_unref(self->conn);
+		self->conn = NULL;
 
-		k_free(addr);                      /* <<< also missing — you leak addr otherwise */
 		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
-		return;                            /* <<< THE MISSING LINE — thread ends here */
+		return;
 	}
 
 	/* ---- STEP 1: PAST ---- */
-	err = bt_le_per_adv_set_info_transfer(pawr_adv, default_conn, 0);
+	err = bt_le_per_adv_set_info_transfer(pawr_adv, self->conn, 0);
 	if (err) {
 		APP_LOG("PAST failed for %s (err %d)\n", addr_str, err);
 		/* not fatal — continue to discover anyway */
 	} else {
 		APP_LOG("PAST sent for %s\n", addr_str);
 	}
-
 	/* ---- STEP 2: GATT DISCOVER ---- */
 	if (proceed) {
-		struct bt_gatt_discover_params discover_params;
-		memset(&discover_params, 0, sizeof(discover_params));
-		discover_params.uuid = &pawr_char_uuid.uuid;
-		discover_params.func = discover_func;
-		discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
-		discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
-		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+		atomic_inc(&active_onboarding_count);   /* <-- ADD: open all subevent windows now */
+		memset(&self->discover_params, 0, sizeof(self->discover_params));
+		self->discover_params.uuid = &pawr_char_uuid.uuid;
+		self->discover_params.func = discover_func;
+		self->discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
+		self->discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+		self->discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 
-		pawr_attr_handle = 0;
-		k_sem_reset(&sem_discovered);
+		self->pawr_attr_handle = 0;
+		k_sem_reset(&self->sem_discovered);
 
-		err = bt_gatt_discover(default_conn, &discover_params);
+		err = bt_gatt_discover(self->conn, &self->discover_params);
 		if (err) {
-			APP_LOG("Discovery start failed for %s (err %d)\n", addr_str, err);			
+			APP_LOG("Discovery start failed for %s (err %d)\n", addr_str, err);
 			proceed = false;
-		} else if (k_sem_take(&sem_discovered, K_SECONDS(10)) != 0) {
+		} else if (!conn_is_live(self->conn)) {
+			APP_LOG("Discovery aborted for %s — connection dropped before wait\n", addr_str);
+			proceed = false;
+		} else if (k_sem_take(&self->sem_discovered, K_SECONDS(10)) != 0) {
 			APP_LOG("Discovery timed out for %s\n", addr_str);
 			proceed = false;
-		} else if (pawr_attr_handle == 0) {
+		} else if (!conn_is_live(self->conn)) {                         // <-- ADD this second check
+			APP_LOG("Discovery aborted for %s — connection dropped during wait\n", addr_str);
+			proceed = false;
+		} else if (self->pawr_attr_handle == 0) {
 			APP_LOG("Characteristic not found for %s\n", addr_str);
 			proceed = false;
 		} else {
-			APP_LOG("Discovery succeeded for %s, handle = %d\n", addr_str, pawr_attr_handle);
+			APP_LOG("Discovery succeeded for %s, handle = %d\n", addr_str, self->pawr_attr_handle);
 		}
 	}
 
@@ -2116,22 +2151,21 @@ void write_disconnect(void *p1, void *p2, void *p3)
 			sync_config.subevent = subevent;
 			sync_config.response_slot = response_slot;
 
-			struct bt_gatt_write_params write_params;
-			memset(&write_params, 0, sizeof(write_params));
-			write_params.func = write_func;
-			write_params.handle = pawr_attr_handle;
-			write_params.offset = 0;
-			write_params.data = &sync_config;
-			write_params.length = sizeof(sync_config);
+			memset(&self->write_params, 0, sizeof(self->write_params));
+			self->write_params.func = write_func;
+			self->write_params.handle = self->pawr_attr_handle;
+			self->write_params.offset = 0;
+			self->write_params.data = &sync_config;
+			self->write_params.length = sizeof(sync_config);
 
-			k_sem_reset(&sem_written);
+			k_sem_reset(&self->sem_written);
 
-			err = bt_gatt_write(default_conn, &write_params);
+			err = bt_gatt_write(self->conn, &self->write_params);
 			if (err) {
 				APP_LOG("Write start failed for %s (err %d)\n", addr_str, err);
 				clear_slot(slot_idx);
 				proceed = false;
-			} else if (k_sem_take(&sem_written, K_SECONDS(10)) != 0) {
+			} else if (k_sem_take(&self->sem_written, K_SECONDS(10)) != 0) {
 				APP_LOG("Write timed out for %s\n", addr_str);
 				clear_slot(slot_idx);
 				proceed = false;
@@ -2143,45 +2177,112 @@ void write_disconnect(void *p1, void *p2, void *p3)
 			}
 		}
 	}
-	
+
 	if (proceed) {
-        int64_t write_time = k_uptime_get();
-        int64_t sync_wait_timeout_ms = 5000;
-        bool got_response = false;
+		int64_t write_time = k_uptime_get();
+		int64_t sync_wait_timeout_ms = 5000;
+		bool got_response = false;
 
-        APP_LOG("Waiting for PAwR sync confirmation from %s...\n", addr_str);
+		APP_LOG("Waiting for PAwR sync confirmation from %s...\n", addr_str);
 
-        while (k_uptime_get() - write_time < sync_wait_timeout_ms) {
-            if (synced_devices[slot_idx].last_response_time > write_time) {
-                got_response = true;
-                APP_LOG("PAwR sync confirmed for %s (took %lld ms)\n",
-                        addr_str, k_uptime_get() - write_time);
-                break;
-            }
-            k_sleep(K_MSEC(100));
-        }
+		while (k_uptime_get() - write_time < sync_wait_timeout_ms) {
+			if (synced_devices[slot_idx].last_response_time > write_time) {
+				got_response = true;
+				APP_LOG("PAwR sync confirmed for %s (took %lld ms)\n",
+						addr_str, k_uptime_get() - write_time);
+				break;
+			}
+			if (!conn_is_live(self->conn)) {
+				APP_LOG("PAwR sync wait aborted for %s — connection dropped\n", addr_str);
+				break;
+			}
+			k_sleep(K_MSEC(100));
+		}
 
-        if (!got_response) {
-            APP_LOG("WARNING: No PAwR response from %s within %lld ms — "
-                    "sync may not be established\n",
-                    addr_str, sync_wait_timeout_ms);
-        }
-    }
+		atomic_dec(&active_onboarding_count);   /* <-- ADD: close it back down */
 
-	/* ---- STEP 4: DISCONNECT — always runs, regardless of proceed state ---- */
-	err = bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-	if (err) {
-		APP_LOG("Disconnect call failed for %s (err %d)\n", addr_str, err);
-	} else {
-		APP_LOG("Disconnect requested for %s\n", addr_str);
+		if (!got_response) {
+			APP_LOG("WARNING: No PAwR response from %s within %lld ms — "
+					"sync may not be established\n",
+					addr_str, sync_wait_timeout_ms);
+		}
 	}
-	bt_conn_unref(default_conn);
-	default_conn = NULL;
 
-	k_free(addr);
-	APP_LOG("write_disconnect thread finished for %s\n", addr_str);
+/* ---- STEP 4: DISCONNECT — always runs, regardless of proceed state ---- */
+	if (conn_is_live(self->conn)) {
+		err = bt_conn_disconnect(self->conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		if (err) {
+			APP_LOG("Disconnect call failed for %s (err %d)\n", addr_str, err);
+		} else {
+			APP_LOG("Disconnect requested for %s\n", addr_str);
+			/* wait for the disconnect to actually complete before unref'ing,
+			* so the peer's conn slot is fully freed before the next
+			* connection attempt to this same address */
+			int wait_ms = 0;
+			while (conn_is_live(self->conn) && wait_ms < 2000) {
+				k_sleep(K_MSEC(50));
+				wait_ms += 50;
+			}
+		}
+	} else {
+		APP_LOG("Conn for %s already down, skipping disconnect call\n", addr_str);
+	}
+
+	bt_conn_unref(self->conn);
+	self->conn = NULL;
+
+	APP_LOG("wdisc worker %d: finished for %s\n", self->id, addr_str);
 	k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
 }
+
+
+
+void wdisc_worker_thread(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	struct wdisc_worker *self = p1;
+	struct wdisc_job job;
+
+	APP_LOG("wdisc worker %d ready\n", self->id);
+
+	while (1) {
+		k_msgq_get(&wdisc_job_q, &job, K_FOREVER);
+		APP_LOG("Received data is : ");
+
+		self->conn = job.conn;
+		wdisc_process_job(self, &job);
+		self->conn = NULL;
+	}
+}
+
+void wdisc_pool_init(int n)
+{
+    if (n > WDISC_POOL_MAX) n = WDISC_POOL_MAX;
+
+    for (int i = 0; i < n; i++) {
+        struct wdisc_worker *w = &wdisc_workers[i];
+
+        w->id = i;
+        w->conn = NULL;
+        w->pawr_attr_handle = 0;
+        k_sem_init(&w->sem_discovered,  0, 1);
+        k_sem_init(&w->sem_written,     0, 1);
+        k_sem_init(&w->sem_remote_info, 0, 1);
+
+        w->tid = k_thread_create(&w->thread, wdisc_stacks[i], WDISC_THREAD_STACK_SIZE,
+                                  wdisc_worker_thread, w, NULL, NULL,
+                                  WDISC_THREAD_PRIORITY, 0, K_NO_WAIT);
+
+        char name[16];
+        snprintf(name, sizeof(name), "wdisc%d", i);
+        k_thread_name_set(w->tid, name);
+    }
+    wdisc_pool_size = n;
+}
+
 
 void main_thread(void *p1, void *p2, void *p3)
 {
@@ -2247,6 +2348,8 @@ int app_initilisation(void){
 	APP_LOG("Start Extended Advertising\n");
 	err = bt_le_ext_adv_start(pawr_adv, BT_LE_EXT_ADV_START_DEFAULT);
 	if (err) { APP_LOG("Failed to start extended advertising (err %d)\n", err); return 0; }
+
+	wdisc_pool_init(WDISC_POOL_SIZE);
 
 	return 1;
 }

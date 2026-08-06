@@ -1603,6 +1603,14 @@ static bool data_cb(struct bt_data *data, void *user_data)
 		return true;
 	}
 }
+/* Custom connection parameters for faster onboarding */
+static struct bt_le_conn_param *fast_conn_param =
+    BT_LE_CONN_PARAM(0x0010, 0x0010, 0, 400); /* 20ms fixed interval, latency 0, 4s timeout */
+
+static struct bt_conn_le_create_param *fast_create_param =
+    BT_CONN_LE_CREATE_PARAM(BT_CONN_LE_OPT_NONE,
+                             BT_GAP_SCAN_FAST_INTERVAL,
+                             BT_GAP_SCAN_FAST_INTERVAL);
 
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 						 struct net_buf_simple *ad)
@@ -1627,7 +1635,7 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	memset(name, 0, sizeof(name));
 	bt_data_parse(ad, data_cb, name);
 
-	if (strcmp(name, "PAWR_SYNC_SAMPLE"))
+	if (strcmp(name, "PARALLEL"))
 		return;
 
 	/* Controller cooldown protection */
@@ -1649,8 +1657,8 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 	// k_sleep(K_MSEC(200));
 
 	err = bt_conn_le_create(addr,
-							BT_CONN_LE_CREATE_CONN,
-							BT_LE_CONN_PARAM_DEFAULT,
+							fast_create_param,
+							fast_conn_param,
 							&default_conn);
 
 	if (err)
@@ -1994,7 +2002,7 @@ int main(void)
 		}
 
 		APP_LOG("PAST sent\n");
-		k_sleep(K_MSEC(3000));
+		k_sleep(K_MSEC(500));
 
 		memset(&discover_params, 0, sizeof(discover_params));
 		discover_params.uuid = &pawr_char_uuid.uuid;
@@ -2062,7 +2070,7 @@ int main(void)
 				slot_idx, sync_config.subevent, sync_config.response_slot);
 
 	disconnect:
-		k_sleep(K_MSEC(per_adv_params.interval_max * 2));
+		k_sleep(K_MSEC((per_adv_params.interval_max * 5)/4));
 
 		if (conn) {                                                    /* <<< CHANGE #6 */
 			k_sleep(K_MSEC(800));

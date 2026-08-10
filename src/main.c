@@ -31,7 +31,7 @@
 #include <zephyr/app_version.h>
 
 static int target_response_subevent = -1;
-
+static int device_count = 0;
 static struct nvs_fs fs;
 static char active_command_mac[BT_ADDR_STR_LEN] = {0};
 #define NVS_ID_MCUMGR_MODE 1
@@ -122,8 +122,14 @@ static int64_t last_onboard_time = 0;
 #define UART_BUF_SIZE 256
 #define CMD_BUF_SIZE 128
 
+#define PAWR_EVENT_MS 3840
+#define ROTATION_CYCLE_MS (PAWR_EVENT_MS * NUM_SUBEVENTS) /* ~57.6 s */
+#define SLOT_TIMEOUT_MS (2 * ROTATION_CYCLE_MS)			  /* ~115 s */
+#define ACTIVE_CHECK_TIMEOUT_MS (4 * PAWR_EVENT_MS)		  /* ~15 s */
+#define ACTIVE_CHECK_MAX_RETRY 2
+
 #define MAX_SYNCS (NUM_SUBEVENTS * NUM_RSP_SLOTS)
-#define SLOT_TIMEOUT_MS 45000 // 90 seconds
+// #define SLOT_TIMEOUT_MS 45000 // 90 seconds
 #define INVALID_SLOT 0xFF
 #define ADDR_STR_LEN BT_ADDR_LE_STR_LEN // full bt_addr_le_to_str() string
 
@@ -256,6 +262,11 @@ static void clear_slot(int slot_index)
 		{
 			num_synced--;
 		}
+		if (device_count > 0) /* <<< ADD */
+		{
+			device_count--;
+		}
+		APP_LOG("[+]count,%d\n", device_count);
 	}
 
 	synced_devices[slot_index].state = PAWR_DEVICE_DISCONNECTED;
@@ -323,6 +334,7 @@ static int find_or_assign_slot(const char *address, uint8_t *subevent, uint8_t *
 				synced_devices[i].last_update_time = k_uptime_get();
 
 				APP_LOG("[+]new,%s\n", address);
+				APP_LOG("[+]count,%d\n", device_count); /* <<< ADD #1 (no ++, already counted) */
 				APP_LOG("Reusing slot %d for device %s (subevent %d, response_slot %d)\n",
 						i, address, *subevent, *response_slot);
 				return i;
@@ -358,7 +370,9 @@ static int find_or_assign_slot(const char *address, uint8_t *subevent, uint8_t *
 			synced_devices[i].has_device_id = false;
 
 			num_synced++;
+			device_count++; /* <<< ADD #2a */
 			APP_LOG("[+]new,%s\n", synced_devices[i].address);
+			APP_LOG("[+]count,%d\n", device_count); /* <<< ADD #2b */
 			APP_LOG("Assigned new slot %d for device %s (subevent %d, response_slot %d)\n",
 					i, address, *subevent, *response_slot);
 			return i;
@@ -935,6 +949,87 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		// APP_LOG("Tweak   : %d\n", APP_VERSION_TWEAK);
 		APP_LOG("======================================\n");
 	}
+	else if (strcmp(cmd, "[+]count") == 0 || strcmp(cmd, "count") == 0)
+	{
+		APP_LOG("[+]count,%d\n", device_count);
+	}
+	else if (strncmp(cmd, "[+]list", 7) == 0 || strncmp(cmd, "list", 4) == 0)
+	{
+#define LIST_MAX_RANGE 20 /* serial protection: cap devices per request */
+
+		/* Parse: "list" | "list,<start>" | "list,<start>,<end>" */
+		int start_index = -1;
+		int end_index = -1;
+
+		const char *comma = strchr(cmd, ',');
+		if (comma)
+		{
+			start_index = atoi(comma + 1);
+
+			const char *comma2 = strchr(comma + 1, ',');
+			if (comma2)
+			{
+				end_index = atoi(comma2 + 1);
+			}
+			else
+			{
+				end_index = start_index; /* single index -> just that one */
+			}
+		}
+
+		/* Collect active slots so indices are contiguous 0..total-1
+		 * (slot numbers in the table can have gaps) */
+		int active_idx[MAX_SYNCS];
+		int total = 0;
+		for (int i = 0; i < MAX_SYNCS; i++)
+		{
+			if (synced_devices[i].active)
+			{
+				active_idx[total++] = i;
+			}
+		}
+
+		/* Bare "list" -> header only */
+		if (start_index < 0)
+		{
+			APP_LOG("[+]list,%d\n", total);
+			APP_LOG("[+]listend\n");
+			return;
+		}
+
+		/* Validate range */
+		if (start_index >= total || end_index < start_index)
+		{
+			APP_LOG("[+]list,err,invalid range (%d devices, valid 0-%d)\n",
+					total, total > 0 ? total - 1 : 0);
+			APP_LOG("[+]listend\n");
+			return;
+		}
+
+		/* Clamp end to available devices and to max chunk size */
+		if (end_index >= total)
+		{
+			end_index = total - 1;
+		}
+		if (end_index - start_index + 1 > LIST_MAX_RANGE)
+		{
+			end_index = start_index + LIST_MAX_RANGE - 1;
+		}
+
+		APP_LOG("[+]list,%d,%d,%d\n", total, start_index, end_index);
+
+		for (int n = start_index; n <= end_index; n++)
+		{
+			int i = active_idx[n];
+			APP_LOG("[+]dev,%d,%s,%d,%d\n",
+					n,
+					synced_devices[i].address,
+					synced_devices[i].subevent,
+					synced_devices[i].response_slot);
+		}
+
+		APP_LOG("[+]listend\n");
+	}
 	else if (strcmp(cmd, "help") == 0)
 	{
 		APP_LOG("\nAvailable commands:\n");
@@ -1263,7 +1358,7 @@ static void response_cb(struct bt_le_ext_adv *adv,
 	bool should_print = response_window_active;
 	if (buf && buf->len > 0)
 	{
-        if (buf->len > 7 && strncmp((char *)buf->data, "[+]res,", 7) == 0)
+		if (buf->len > 7 && strncmp((char *)buf->data, "[+]res,", 7) == 0)
 		{
 			char res_str[64] = {0};
 			size_t copy_len = MIN(buf->len, sizeof(res_str) - 1);
@@ -1278,7 +1373,7 @@ static void response_cb(struct bt_le_ext_adv *adv,
 			const char *mac_start = res_str + 7;
 			const char *comma = strchr(mac_start, ',');
 			size_t mac_len = comma ? (size_t)(comma - mac_start)
-					       : strlen(mac_start);
+								   : strlen(mac_start);
 			if (mac_len >= sizeof(mac))
 			{
 				mac_len = sizeof(mac) - 1;
@@ -1289,7 +1384,7 @@ static void response_cb(struct bt_le_ext_adv *adv,
 			for (int i = 0; i < MAX_SYNCS; i++)
 			{
 				if (synced_devices[i].active &&
-				    strncmp(mac, synced_devices[i].address, 17) == 0)
+					strncmp(mac, synced_devices[i].address, 17) == 0)
 				{
 					synced_devices[i].last_response_time = k_uptime_get();
 					synced_devices[i].state = PAWR_DEVICE_SYNCED;
@@ -1589,7 +1684,7 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 		{
 			char addr_str[BT_ADDR_LE_STR_LEN] = {0};
 			bt_addr_le_to_str(dev_addr, addr_str, sizeof(addr_str));
-            printk("[+]CONN,%s\n", addr_str);
+			printk("[+]CONN,%s\n", addr_str);
 			for (int i = 0; i < MAX_SYNCS; i++)
 			{
 				if (synced_devices[i].active &&
@@ -1817,7 +1912,7 @@ void cleanup_inactive_slots(void)
 
 				response_window_active = true;
 				response_window_expiry_ms = k_uptime_get() + 10000;
-
+				current_response_subevent = synced_devices[i].subevent;
 				synced_devices[i].active_check_pending = true;
 				synced_devices[i].active_check_retry = 0;
 				synced_devices[i].active_check_time = k_uptime_get();
@@ -1827,23 +1922,32 @@ void cleanup_inactive_slots(void)
 			}
 			else
 			{
-				APP_LOG("ACTIVE pending: elapsed=%lld\n",
-						k_uptime_get() - synced_devices[i].active_check_time);
-				APP_LOG("RESPONSE_WINDOW_TIMEOUT_MS=%d\n",
-						RESPONSE_WINDOW_TIMEOUT_MS);
 				if (k_uptime_get() - synced_devices[i].active_check_time >
-					RESPONSE_WINDOW_TIMEOUT_MS)
+					ACTIVE_CHECK_TIMEOUT_MS)
 				{
-					APP_LOG("ACTIVE timeout -> clearing slot %d\n", i);
+					if (synced_devices[i].active_check_retry < ACTIVE_CHECK_MAX_RETRY)
+					{
+						synced_devices[i].active_check_retry++;
+						synced_devices[i].active_check_time = k_uptime_get();
+						current_response_subevent = synced_devices[i].subevent;
 
-					clear_slot(i);
+						/* keep the ACTIVE command alive for the retry */
+						temp_command_active = true;
+						temp_command_expiry_ms = k_uptime_get() + 10000;
+						response_window_active = true;
+						response_window_expiry_ms = k_uptime_get() + 10000;
+
+						APP_LOG("ACTIVE retry %d for %s\n",
+								synced_devices[i].active_check_retry,
+								synced_devices[i].address);
+					}
+					else
+					{
+						APP_LOG("ACTIVE timeout -> clearing slot %d\n", i);
+						clear_slot(i); /* only now is DISCONNECTED justified */
+					}
 				}
 			}
-			APP_LOG("slot=%d active=%d pending=%d retry=%d\n",
-					i,
-					synced_devices[i].active,
-					synced_devices[i].active_check_pending,
-					synced_devices[i].active_check_retry);
 			continue;
 		}
 

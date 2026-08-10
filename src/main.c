@@ -561,7 +561,7 @@ void encode_clear_command_with_mac(uint8_t *mac)
 	APP_LOG("CLEAR proto len: %d\n", (int)proto_len);
 }
 
-void encode_join_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
+void encode_join_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac, uint64_t obj_id)
 {
 	Command cmd = Command_init_zero;
 	cmd.request_id = 1;
@@ -570,6 +570,7 @@ void encode_join_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
 	cmd.cmd.join.mac.size = 6;
 	memcpy(cmd.cmd.join.ots_mac.bytes, ots_mac, 6);
 	cmd.cmd.join.ots_mac.size = 6;
+	cmd.cmd.join.obj_id = obj_id; /* NEW */
 
 	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
 	if (!pb_encode(&stream, Command_fields, &cmd))
@@ -581,7 +582,7 @@ void encode_join_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
 	}
 	proto_len = stream.bytes_written;
 	proto_command_active = true;
-	APP_LOG("Join proto len: %d\n", (int)proto_len);
+	APP_LOG("Join proto len: %d (obj_id=%llu)\n", (int)proto_len, obj_id);
 }
 
 void encode_ota_command_with_mac(uint8_t *esl_mac, uint8_t *ots_mac)
@@ -637,17 +638,21 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 	{
 		char esl_mac_str[32];
 		char ots_mac_str[32];
+		unsigned long long obj_id = 0; /* 0 = device uses its default */
 
 		uint8_t esl_mac[6];
 		uint8_t ots_mac[6];
 
-		if (sscanf(cmd,
-				   "[+]join,%31[^,],%31s",
-				   esl_mac_str,
-				   ots_mac_str) != 2)
+		int fields = sscanf(cmd,
+							"[+]join,%31[^,],%31[^,],%llu",
+							esl_mac_str,
+							ots_mac_str,
+							&obj_id);
+
+		if (fields < 2)
 		{
 			APP_LOG("Invalid join format\n");
-			APP_LOG("Expected: [+]join,<esl_mac>,<ots_mac>\n");
+			APP_LOG("Expected: [+]join,<esl_mac>,<ots_mac>[,<obj_id>]\n");
 			return;
 		}
 
@@ -676,13 +681,15 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 				break;
 			}
 		}
-		encode_join_command_with_mac(esl_mac, ots_mac);
+
+		encode_join_command_with_mac(esl_mac, ots_mac, (uint64_t)obj_id);
 
 		if (proto_command_active && proto_len > 0)
 		{
 			APP_LOG("SUCCESS: Join command sent\n");
 			APP_LOG("ESL MAC : %s\n", esl_mac_str);
 			APP_LOG("OTS MAC : %s\n", ots_mac_str);
+			APP_LOG("OBJ ID  : %llu\n", obj_id);
 		}
 		else
 		{
@@ -1256,6 +1263,42 @@ static void response_cb(struct bt_le_ext_adv *adv,
 	bool should_print = response_window_active;
 	if (buf && buf->len > 0)
 	{
+        if (buf->len > 7 && strncmp((char *)buf->data, "[+]res,", 7) == 0)
+		{
+			char res_str[64] = {0};
+			size_t copy_len = MIN(buf->len, sizeof(res_str) - 1);
+			memcpy(res_str, buf->data, copy_len);
+			res_str[copy_len] = '\0';
+
+			/* Print the ack line as-is */
+			APP_LOG("%s\n", res_str);
+
+			/* Extract the MAC part to update slot bookkeeping */
+			char mac[BT_ADDR_LE_STR_LEN] = {0};
+			const char *mac_start = res_str + 7;
+			const char *comma = strchr(mac_start, ',');
+			size_t mac_len = comma ? (size_t)(comma - mac_start)
+					       : strlen(mac_start);
+			if (mac_len >= sizeof(mac))
+			{
+				mac_len = sizeof(mac) - 1;
+			}
+			memcpy(mac, mac_start, mac_len);
+			mac[mac_len] = '\0';
+
+			for (int i = 0; i < MAX_SYNCS; i++)
+			{
+				if (synced_devices[i].active &&
+				    strncmp(mac, synced_devices[i].address, 17) == 0)
+				{
+					synced_devices[i].last_response_time = k_uptime_get();
+					synced_devices[i].state = PAWR_DEVICE_SYNCED;
+					break;
+				}
+			}
+			return;
+		}
+
 		char tel_mac[24] = {0};
 		char tel_meta[64] = {0};
 		if (buf && buf->len > 3)
@@ -1546,7 +1589,7 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 		{
 			char addr_str[BT_ADDR_LE_STR_LEN] = {0};
 			bt_addr_le_to_str(dev_addr, addr_str, sizeof(addr_str));
-
+            printk("[+]CONN,%s\n", addr_str);
 			for (int i = 0; i < MAX_SYNCS; i++)
 			{
 				if (synced_devices[i].active &&
@@ -1605,12 +1648,12 @@ static bool data_cb(struct bt_data *data, void *user_data)
 }
 /* Custom connection parameters for faster onboarding */
 static struct bt_le_conn_param *fast_conn_param =
-    BT_LE_CONN_PARAM(0x0010, 0x0010, 0, 400); /* 20ms fixed interval, latency 0, 4s timeout */
+	BT_LE_CONN_PARAM(0x0010, 0x0010, 0, 400); /* 20ms fixed interval, latency 0, 4s timeout */
 
 static struct bt_conn_le_create_param *fast_create_param =
-    BT_CONN_LE_CREATE_PARAM(BT_CONN_LE_OPT_NONE,
-                             BT_GAP_SCAN_FAST_INTERVAL,
-                             BT_GAP_SCAN_FAST_INTERVAL);
+	BT_CONN_LE_CREATE_PARAM(BT_CONN_LE_OPT_NONE,
+							BT_GAP_SCAN_FAST_INTERVAL,
+							BT_GAP_SCAN_FAST_INTERVAL);
 
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 						 struct net_buf_simple *ad)
@@ -1880,7 +1923,6 @@ void maint_thread(void *p1, void *p2, void *p3)
 	}
 }
 
-
 int main(void)
 {
 	APP_LOG("APPLICATION STARTED 2\n");
@@ -1888,16 +1930,25 @@ int main(void)
 	static struct bt_gatt_discover_params discover_params;
 	static struct bt_gatt_write_params write_params;
 	static struct pawr_timing sync_config;
-	struct bt_conn *conn = NULL;   /* <<< ADD: local per-iteration reference */
+	struct bt_conn *conn = NULL; /* <<< ADD: local per-iteration reference */
 
 	init_bufs();
 	err = nvs_init_app();
-	if (err) { APP_LOG("NVS initialization failed (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("NVS initialization failed (err %d)\n", err);
+		return 0;
+	}
 
 	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart30));
-	if (!device_is_ready(uart_dev)) { APP_LOG("UART device not ready!\n"); return 0; }
+	if (!device_is_ready(uart_dev))
+	{
+		APP_LOG("UART device not ready!\n");
+		return 0;
+	}
 
-	for (int i = 0; i < MAX_SYNCS; i++) {
+	for (int i = 0; i < MAX_SYNCS; i++)
+	{
 		memset(&synced_devices[i], 0, sizeof(synced_devices[i]));
 		synced_devices[i].subevent = INVALID_SLOT;
 		synced_devices[i].response_slot = INVALID_SLOT;
@@ -1906,11 +1957,14 @@ int main(void)
 
 	uint8_t flag = 0;
 	ssize_t len = nvs_read(&fs, NVS_ID_MCUMGR_MODE, &flag, sizeof(flag));
-	if (len > 0 && flag == 1) {
+	if (len > 0 && flag == 1)
+	{
 		printk("MCUmgr boot\n");
 		flag = 0;
 		nvs_write(&fs, NVS_ID_MCUMGR_MODE, &flag, sizeof(flag));
-	} else {
+	}
+	else
+	{
 		console_getline_init();
 	}
 
@@ -1919,21 +1973,41 @@ int main(void)
 	APP_LOG("Starting Periodic Advertising Demo\n");
 
 	err = bt_enable(NULL);
-	if (err) { APP_LOG("Bluetooth init failed (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Bluetooth init failed (err %d)\n", err);
+		return 0;
+	}
 
 	err = bt_le_ext_adv_create(BT_LE_EXT_ADV_NCONN, &adv_cb, &pawr_adv);
-	if (err) { APP_LOG("Failed to create advertising set (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Failed to create advertising set (err %d)\n", err);
+		return 0;
+	}
 
 	err = bt_le_per_adv_set_param(pawr_adv, &per_adv_params);
-	if (err) { APP_LOG("Failed to set periodic advertising parameters (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Failed to set periodic advertising parameters (err %d)\n", err);
+		return 0;
+	}
 
 	APP_LOG("Start Periodic Advertising\n");
 	err = bt_le_per_adv_start(pawr_adv);
-	if (err) { APP_LOG("Failed to enable periodic advertising (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Failed to enable periodic advertising (err %d)\n", err);
+		return 0;
+	}
 
 	APP_LOG("Start Extended Advertising\n");
 	err = bt_le_ext_adv_start(pawr_adv, BT_LE_EXT_ADV_START_DEFAULT);
-	if (err) { APP_LOG("Failed to start extended advertising (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Failed to start extended advertising (err %d)\n", err);
+		return 0;
+	}
 
 	struct k_thread join_thread_data;
 	k_thread_create(&join_thread_data, join_thread_stack, JOIN_THREAD_STACK_SIZE,
@@ -1948,24 +2022,29 @@ int main(void)
 	{
 		err = 0;
 
-		if (num_synced >= MAX_SYNCS) {
+		if (num_synced >= MAX_SYNCS)
+		{
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
 
-		if (!default_conn) {
+		if (!default_conn)
+		{
 			err = bt_le_scan_start(BT_LE_SCAN_PASSIVE_CONTINUOUS, device_found);
 		}
-		if (err && err != -EALREADY) {
+		if (err && err != -EALREADY)
+		{
 			APP_LOG("Scanning failed to start (err %d)\n", err);
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
 
-		if (k_sem_take(&sem_connected, K_SECONDS(6)) != 0) {
+		if (k_sem_take(&sem_connected, K_SECONDS(6)) != 0)
+		{
 			APP_LOG("Connection wait timeout → recovering...\n");
 
-			if (default_conn) {
+			if (default_conn)
+			{
 				bt_conn_unref(default_conn);
 				default_conn = NULL;
 			}
@@ -1985,7 +2064,8 @@ int main(void)
 		conn = default_conn ? bt_conn_ref(default_conn) : NULL;
 		k_sched_unlock();
 
-		if (!conn) {
+		if (!conn)
+		{
 			APP_LOG("Connection failed, retrying...\n");
 			atomic_set(&onboarding_busy, 0);
 			k_sleep(K_MSEC(200));
@@ -1995,8 +2075,9 @@ int main(void)
 
 		k_sleep(K_MSEC(150));
 
-		err = bt_le_per_adv_set_info_transfer(pawr_adv, conn, 0);   /* <<< CHANGE #2 */
-		if (err) {
+		err = bt_le_per_adv_set_info_transfer(pawr_adv, conn, 0); /* <<< CHANGE #2 */
+		if (err)
+		{
 			APP_LOG("Failed to send PAST (err %d)\n", err);
 			goto disconnect;
 		}
@@ -2012,8 +2093,9 @@ int main(void)
 		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 
 		pawr_attr_handle = 0;
-		err = bt_gatt_discover(conn, &discover_params);              /* <<< CHANGE #3 */
-		if (err) {
+		err = bt_gatt_discover(conn, &discover_params); /* <<< CHANGE #3 */
+		if (err)
+		{
 			APP_LOG("Discovery failed (err %d)\n", err);
 			goto disconnect;
 		}
@@ -2021,18 +2103,28 @@ int main(void)
 		APP_LOG("Discovery started\n");
 
 		err = k_sem_take(&sem_discovered, K_SECONDS(10));
-		if (err) { APP_LOG("Timed out during GATT discovery\n"); goto disconnect; }
-		if (pawr_attr_handle == 0) { APP_LOG("Characteristic not found"); goto disconnect; }
+		if (err)
+		{
+			APP_LOG("Timed out during GATT discovery\n");
+			goto disconnect;
+		}
+		if (pawr_attr_handle == 0)
+		{
+			APP_LOG("Characteristic not found");
+			goto disconnect;
+		}
 
 		char addr_str[BT_ADDR_LE_STR_LEN] = {0};
-		const bt_addr_le_t *dev_addr = bt_conn_get_dst(conn);        /* <<< CHANGE #4 (no null check needed, conn is guaranteed valid) */
-		if (dev_addr) {
+		const bt_addr_le_t *dev_addr = bt_conn_get_dst(conn); /* <<< CHANGE #4 (no null check needed, conn is guaranteed valid) */
+		if (dev_addr)
+		{
 			bt_addr_le_to_str(dev_addr, addr_str, sizeof(addr_str));
 		}
 
 		uint8_t subevent = 0, response_slot = 0;
 		int slot_idx = find_or_assign_slot(addr_str, &subevent, &response_slot);
-		if (slot_idx < 0) {
+		if (slot_idx < 0)
+		{
 			APP_LOG("No slot available for device %s\n", addr_str);
 			goto disconnect;
 		}
@@ -2046,8 +2138,9 @@ int main(void)
 		write_params.data = &sync_config;
 		write_params.length = sizeof(sync_config);
 
-		err = bt_gatt_write(conn, &write_params);                     /* <<< CHANGE #5 */
-		if (err) {
+		err = bt_gatt_write(conn, &write_params); /* <<< CHANGE #5 */
+		if (err)
+		{
 			APP_LOG("Write failed (err %d)\n", err);
 			clear_slot(slot_idx);
 			goto disconnect;
@@ -2056,7 +2149,8 @@ int main(void)
 		APP_LOG("Write started\n");
 
 		err = k_sem_take(&sem_written, K_SECONDS(10));
-		if (err) {
+		if (err)
+		{
 			APP_LOG("Timed out during GATT write\n");
 			clear_slot(slot_idx);
 			goto disconnect;
@@ -2070,24 +2164,28 @@ int main(void)
 				slot_idx, sync_config.subevent, sync_config.response_slot);
 
 	disconnect:
-		k_sleep(K_MSEC((per_adv_params.interval_max * 5)/4));
+		k_sleep(K_MSEC((per_adv_params.interval_max * 5) / 4));
 
-		if (conn) {                                                    /* <<< CHANGE #6 */
+		if (conn)
+		{ /* <<< CHANGE #6 */
 			k_sleep(K_MSEC(800));
 			err = bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-			if (err) {
+			if (err)
+			{
 				APP_LOG("Disconnect failed (err %d)\n", err);
 				atomic_set(&onboarding_busy, 0);
-				bt_conn_unref(conn);          /* <<< CHANGE #7 — release local ref before continue */
+				bt_conn_unref(conn); /* <<< CHANGE #7 — release local ref before continue */
 				conn = NULL;
 				k_sleep(K_MSEC(200));
 				continue;
 			}
 		}
 
-		if (k_sem_take(&sem_disconnected, K_SECONDS(5))) {
+		if (k_sem_take(&sem_disconnected, K_SECONDS(5)))
+		{
 			APP_LOG("Disconnect timeout\n");
-			if (conn) {                                                /* <<< CHANGE #8 */
+			if (conn)
+			{ /* <<< CHANGE #8 */
 				bt_conn_unref(conn);
 				conn = NULL;
 			}
@@ -2097,7 +2195,8 @@ int main(void)
 		/* <<< CHANGE #9 — always release your local ref at the end of
 		 * a successful iteration, whether via the normal path or via
 		 * `disconnect:` fallthrough */
-		if (conn) {
+		if (conn)
+		{
 			bt_conn_unref(conn);
 			conn = NULL;
 		}
@@ -2112,8 +2211,10 @@ int main(void)
 	APP_LOG("Example: 1234  (sends [+]join,1234 for a few seconds)\n");
 
 	APP_LOG("\n=== Synced Devices Status ===\n");
-	for (int i = 0; i < MAX_SYNCS; i++) {
-		if (synced_devices[i].active) {
+	for (int i = 0; i < MAX_SYNCS; i++)
+	{
+		if (synced_devices[i].active)
+		{
 			const char *id_str = synced_devices[i].has_device_id ? synced_devices[i].device_id : "unknown";
 			APP_LOG("Device %d: dev_id %s, subevent %d, response_slot %d, addr %s\n",
 					i, id_str, synced_devices[i].subevent,
@@ -2122,10 +2223,12 @@ int main(void)
 	}
 	APP_LOG("============================\n\n");
 
-	while (1) {
+	while (1)
+	{
 		k_sleep(K_SECONDS(5));
 		static int status_counter = 0;
-		if (++status_counter >= 12) {
+		if (++status_counter >= 12)
+		{
 			status_counter = 0;
 			APP_LOG("System status: %d synced devices active, waiting for commands...\n", num_synced);
 			APP_LOG("Current command: %s | temp_active: %s\n", current_command,

@@ -26,6 +26,8 @@ message ClearEpdCommand {
 message JoinCommand {
   bytes mac = 1;
   bytes ots_mac = 2;
+  uint64 obj_id = 3;
+
 }
  
 message OtaCommand {

@@ -1587,8 +1587,8 @@ static void response_cb(struct bt_le_ext_adv *adv,
 }
 
 static const struct bt_le_ext_adv_cb adv_cb = {
-	.pawr_data_request = request_cb,
-	.pawr_response = response_cb,
+	.pawr_data_request = request_cb, // pap to esl
+	.pawr_response = response_cb,	// esl to pap
 };
 
 

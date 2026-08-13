@@ -53,12 +53,15 @@ DEFAULT_CSV = "batch_mac.csv"
 # Command buttons shown in the GUI.  needs_target=True -> asks for a target MAC
 # and builds:  prefix + csv_mac + "," + target_mac
 COMMANDS = {
-    "LED":    {"prefix": "[+]led,",    "needs_target": False},
-    "TEL":    {"prefix": "[+]tel,",    "needs_target": False},
-    "SPLASH": {"prefix": "[+]splash,", "needs_target": False},
-    "CLEAR":  {"prefix": "[+]clear,",  "needs_target": False},
-    "JOIN":   {"prefix": "[+]join,",   "needs_target": True},
+    "LED":    {"prefix": "[+]led,",    "needs_target": False, "raw": False},
+    "TEL":    {"prefix": "[+]tel,",    "needs_target": False, "raw": False},
+    "SPLASH": {"prefix": "[+]splash,", "needs_target": False, "raw": False},
+    "CLEAR":  {"prefix": "[+]clear,",  "needs_target": False, "raw": False},
+    "JOIN":   {"prefix": "[+]join,",   "needs_target": True,  "raw": False},
+    "PING":   {"prefix": "[+]ping_all",   "needs_target": False, "raw": True},
+    "LIST":   {"prefix": "[+]list,0,19",   "needs_target": False, "raw": True},
 }
+
 DEFAULT_COMMAND = "LED"
 TIN_COLUMN = "TIN Number"
 MAC_COLUMN = "mac address"
@@ -66,6 +69,8 @@ LINE_ENDING = "\r\n"
 READ_TIMEOUT = 2.0
 DELAY_BETWEEN_COMMANDS = 5.0
 RESULT_PREFIX = "[+]res,"      # device lines starting with this are "wanted" results
+DEV_PREFIX = "[+]dev,"
+
 # -------------------------------------------------------------------------------------
 TEL_RESPONSE_TIMEOUT = 12.0   # near the other config constants at the top
 
@@ -94,9 +99,12 @@ class SerialWorker(QThread):
     def request_disconnect(self):
         self._disconnect_requested = True
 
-    def enqueue(self, digits_list, prefix, target_mac=None):
+    def enqueue(self, digits_list, prefix, target_mac=None, raw=False):
+        if raw:
+            self._queue.append((None, prefix, None, True))
+            return
         for d in digits_list:
-            self._queue.append((d, prefix, target_mac))
+            self._queue.append((d, prefix, target_mac, False))
 
     def set_sheet(self, df):
         self.df = df
@@ -121,8 +129,8 @@ class SerialWorker(QThread):
             self._read_incoming()
 
             if self._queue and self.ser and self.ser.is_open:
-                digits, prefix, target_mac = self._queue.pop(0)
-                self._process_one(digits, prefix, target_mac)
+                digits, prefix, target_mac, raw = self._queue.pop(0)
+                self._process_one(digits, prefix, target_mac, raw)
                 if self._queue and prefix != "[+]tel,":   # <-- TEL paces itself
                     # keep reading incoming data during the inter-command delay
                     end = time.time() + DELAY_BETWEEN_COMMANDS
@@ -176,7 +184,12 @@ class SerialWorker(QThread):
             return None, f"TIN {row[TIN_COLUMN]} found, but its MAC cell is empty."
         return (row[TIN_COLUMN], str(mac).strip()), None
 
-    def _process_one(self, digits, prefix, target_mac=None):
+    def _process_one(self, digits, prefix, target_mac=None, raw=False):
+        if raw:
+            self.log.emit("INFO", f"Sending raw command (no TIN/MAC lookup)")
+            self._send(prefix)
+            return
+
         if self.df is None:
             self.log.emit("ERROR", "No CSV sheet loaded.")
             return
@@ -231,48 +244,16 @@ class SerialWorker(QThread):
                     received = True
                     self.log.emit("RECV", decoded)
                     # Bifurcate: wanted result lines also go to the Results panel
-                    if decoded.startswith(RESULT_PREFIX):
-                        self.result.emit(decoded)
-                        parts = decoded[len(RESULT_PREFIX):].split(",")
-                        if parts:
-                            self._last_res_mac = parts[0].strip().upper()
+                if decoded.startswith(RESULT_PREFIX) or decoded.startswith(DEV_PREFIX):
+                    self.result.emit(decoded)
+                    prefix_len = len(RESULT_PREFIX) if decoded.startswith(RESULT_PREFIX) else len(DEV_PREFIX)
+                    parts = decoded[prefix_len:].split(",")
+                    if parts:
+                        self._last_res_mac = parts[0].strip().upper()
         except (serial.SerialException, OSError) as e:
             self.log.emit("ERROR", f"Serial read error: {e}")
             self._do_disconnect()
         return received
-    TEL_RESPONSE_TIMEOUT = 12.0   # near the other config constants at the top
-
-    def _process_one(self, digits, prefix, target_mac=None):
-        if self.df is None:
-            self.log.emit("ERROR", "No CSV sheet loaded.")
-            return
-        self.log.emit("INFO", f"Looking up TIN ending '{digits}'")
-        result, error = self._find_mac(digits)
-        if error:
-            self.log.emit("ERROR", error)
-            return
-        tin, mac = result
-        command = prefix + mac
-        if target_mac:
-            command += "," + target_mac
-        self.log.emit("INFO", f"Matched TIN: {tin}  MAC: {mac}")
-        self._send(command)
-
-        # --- TEL ONLY: block until THIS device's [+]res arrives ---
-        if prefix == "[+]tel,":
-            want = mac.strip().upper()
-            self._last_res_mac = None
-            deadline = time.time() + TEL_RESPONSE_TIMEOUT
-            while time.time() < deadline:
-                self._read_incoming()
-                if self._last_res_mac == want:
-                    self.log.emit("INFO",
-                                  f"[+]res received from {mac} — sending next command")
-                    return
-                time.sleep(0.02)
-            self.log.emit("WARN",
-                          f"No [+]res from {mac} within {TEL_RESPONSE_TIMEOUT:.0f}s — moving on")
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -285,6 +266,7 @@ class MainWindow(QMainWindow):
         self.results_filename = datetime.now().strftime("results_%Y%m%d_%H%M%S.txt")
         self.results_file = open(self.results_filename, "a", encoding="utf-8")
         self.df = None
+        self.seen_ping_tins = set()   # <-- add this
 
         self.worker = SerialWorker()
         self.worker.log.connect(self.append_log)
@@ -417,7 +399,7 @@ class MainWindow(QMainWindow):
         self.result_view.setMaximumBlockCount(5000)
         rv.addWidget(self.result_view)
         self.clear_res_btn = QPushButton("Clear")
-        self.clear_res_btn.clicked.connect(self.result_view.clear)
+        self.clear_res_btn.clicked.connect(self.clear_results)
         rv.addWidget(self.clear_res_btn, alignment=Qt.AlignRight)
         splitter.addWidget(res_box)
 
@@ -506,6 +488,16 @@ class MainWindow(QMainWindow):
                 self.tin_edit.setFocus()
 
     def on_enter(self):
+        cmd_name = self.selected_command()
+        spec = COMMANDS[cmd_name]
+        prefix = spec["prefix"]
+
+        if spec.get("raw"):
+            self.append_log("INFO", f"--- {cmd_name}: sending raw command ---")
+            self.worker.enqueue([], prefix, raw=True)
+            self.tin_edit.clear()
+            return
+
         text = self.tin_edit.text().strip()
         if not text:
             return
@@ -516,10 +508,6 @@ class MainWindow(QMainWindow):
             self.append_log("WARN", f"Ignoring non-digit input: {invalid}")
         if not valid:
             return
-
-        cmd_name = self.selected_command()
-        spec = COMMANDS[cmd_name]
-        prefix = spec["prefix"]
 
         target_mac = None
         if spec["needs_target"]:
@@ -556,21 +544,35 @@ class MainWindow(QMainWindow):
         self.log_file.flush()
 
     def append_result(self, raw_line):
-        """Parse a '[+]res,...' line and show it in the Results panel.
+        """Parse a result line and show it in the Results panel.
 
-        Expected format:
+        Expected formats:
             [+]res,<MAC>,<TIN>,<val1>,<fw_version>,<val2>,<rssi>
+            [+]dev,ping,<TIN>
         e.g.:
             [+]res,F9:6F:C7:AB:F8:91,EN0010000242,2868,0.0.1,1562,-35
         """
         timestamp = datetime.now().strftime("%H:%M:%S")
-        payload = raw_line[len(RESULT_PREFIX):]
+
+        if raw_line.startswith(RESULT_PREFIX):
+            payload = raw_line[len(RESULT_PREFIX):]
+        elif raw_line.startswith(DEV_PREFIX):
+            payload = raw_line[len(DEV_PREFIX):]
+        else:
+            payload = raw_line  # fallback, shouldn't normally hit this
+
         parts = [p.strip() for p in payload.split(",")]
 
-        if len(parts) >= 6:
+        if len(parts) >= 2 and parts[0].lower() == "ping":
+            tin = parts[1]
+            if tin in self.seen_ping_tins:
+                return  # already shown — skip duplicate
+            self.seen_ping_tins.add(tin)
+            pretty = f"[{timestamp}] PING reply — TIN: {tin}"
+        elif len(parts) >= 6:
             mac, tin, val1, fw, val2, rssi = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
             pretty = (f"[{timestamp}] TIN: {tin} | MAC: {mac} | "
-                      f"val1: {val1} | FW: {fw} | val2: {val2} | RSSI: {rssi}")
+                    f"val1: {val1} | FW: {fw} | val2: {val2} | RSSI: {rssi}")
         else:
             # Unexpected shape — still capture it raw so nothing is lost
             pretty = f"[{timestamp}] RAW: {raw_line}"
@@ -585,6 +587,10 @@ class MainWindow(QMainWindow):
         self.results_file.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {raw_line}\n")
         self.results_file.flush()
 
+    def clear_results(self):
+        self.result_view.clear()
+        self.seen_ping_tins.clear()
+
     def closeEvent(self, event):
         self.worker.stop()
         self.worker.wait(2000)
@@ -592,7 +598,6 @@ class MainWindow(QMainWindow):
         self.log_file.close()
         self.results_file.close()
         event.accept()
-
 
 def main():
     app = QApplication(sys.argv)

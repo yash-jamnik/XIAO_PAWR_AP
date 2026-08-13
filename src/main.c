@@ -20,9 +20,7 @@
 #include <zephyr/storage/flash_map.h>
 
 /* Variable Declaration for Scanning Usage */
-// #define DEVICE_NAME "Internal_testing"
-#define DEVICE_NAME "PARALLEL"
-// #define DEVICE_NAME "PAwR sync sample"
+#define DEVICE_NAME "PARALLEL"		//  "PAwR sync sample" ,  "Internal_testing"
 
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS 20
@@ -39,6 +37,8 @@ static struct scan_result_t scan_results[MAX_SCAN_RESULTS];
 static uint8_t scan_result_count;
 static struct k_mutex results_mutex;
 static struct k_mutex radio_mutex;
+static struct k_mutex synced_devices_mutex;
+
 
 /* ---- Control primitives ---- */
 K_SEM_DEFINE(scan_done_sem, 0, 1);	  /* signaled when 20 found, or on timeout fallback */
@@ -464,6 +464,8 @@ static void clear_slot_silent(int slot_index)
 // Find existing slot by address, or assign a new one
 static int find_or_assign_slot(const char *address, uint8_t *subevent, uint8_t *response_slot)
 {
+	// k_mutex_lock(&synced_devices_mutex, K_FOREVER);
+
 	// First, search for an existing active slot with same address
 	for (int i = 0; i < MAX_SYNCS; i++)
 	{
@@ -521,61 +523,78 @@ static int find_or_assign_slot(const char *address, uint8_t *subevent, uint8_t *
 	}
 
 	APP_LOG("No available slot for device %s\n", address);
+	// k_mutex_unlock(&synced_devices_mutex);
 	return -1; // No slot available
 }
 
 // Function to send command data to all synced devices (immediate push)
 static int send_command_to_synced_devices(struct bt_le_ext_adv *pawr_adv, const char *command)
 {
-	int err;
-	uint8_t active_devices = 0;
-	size_t cmd_len = strlen(command);
+    int active_devices = 0;
+    APP_LOG("Updating command to: '%s'\n", command);
+    strncpy(current_command, command, CMD_BUF_SIZE - 1);
+    current_command[CMD_BUF_SIZE - 1] = '\0';
 
-	APP_LOG("Updating command to: '%s'\n", command);
+    for (int i = 0; i < MAX_SYNCS; i++) {
+        if (synced_devices[i].active) active_devices++;
+    }
 
-	// Update the global current command
-	strncpy(current_command, command, CMD_BUF_SIZE - 1);
-	current_command[CMD_BUF_SIZE - 1] = '\0';
-
-	// Count active synced devices
-	for (int i = 0; i < MAX_SYNCS; i++)
-	{
-		if (synced_devices[i].active)
-		{
-			active_devices++;
-		}
-	}
-
-	if (active_devices == 0)
-	{
-		APP_LOG("No synced devices available - but command updated for future requests\n");
-		APP_LOG("Current command will be sent when devices sync or on next PAwR request\n");
-		return 0;
-	}
-
-	// Immediately prepare and send the new command data
-	for (size_t i = 0; i < NUM_SUBEVENTS; i++)
-	{
-		struct net_buf_simple *buf = &bufs[i];
-
-		memset(buf->data, 0, PACKET_SIZE);
-
-		size_t copy_len = MIN(cmd_len, PACKET_SIZE - 1);
-		memcpy(buf->data, command, copy_len);
-		buf->data[copy_len] = '\0';
-		buf->len = copy_len + 1;
-
-		subevent_data_params[i].subevent = i;
-		subevent_data_params[i].response_slot_start = 0;
-		subevent_data_params[i].response_slot_count = NUM_RSP_SLOTS;
-		subevent_data_params[i].data = buf;
-	}
-
-	err = bt_le_per_adv_set_subevent_data(pawr_adv, NUM_SUBEVENTS, subevent_data_params);
-	APP_LOG("Command '%s' sent immediately to %d synced devices\n", command, active_devices);
-	APP_LOG("Current active command: '%s'\n", current_command);
-
+    if (active_devices == 0) {
+        APP_LOG("No synced devices available - command updated for future requests\n");
+        return 0;
+    }
+	APP_LOG("Command '%s' queued; will be sent on next PAwR request\n", command);
 	return 0;
+
+	// int err;
+	// uint8_t active_devices = 0;
+	// size_t cmd_len = strlen(command);
+
+	// APP_LOG("Updating command to: '%s'\n", command);
+
+	// // Update the global current command
+	// strncpy(current_command, command, CMD_BUF_SIZE - 1);
+	// current_command[CMD_BUF_SIZE - 1] = '\0';
+
+	// // Count active synced devices
+	// for (int i = 0; i < MAX_SYNCS; i++)
+	// {
+	// 	if (synced_devices[i].active)
+	// 	{
+	// 		active_devices++;
+	// 	}
+	// }
+
+	// if (active_devices == 0)
+	// {
+	// 	APP_LOG("No synced devices available - but command updated for future requests\n");
+	// 	APP_LOG("Current command will be sent when devices sync or on next PAwR request\n");
+	// 	return 0;
+	// }
+
+	// // Immediately prepare and send the new command data
+	// for (size_t i = 0; i < NUM_SUBEVENTS; i++)
+	// {
+	// 	struct net_buf_simple *buf = &bufs[i];
+
+	// 	memset(buf->data, 0, PACKET_SIZE);
+
+	// 	size_t copy_len = MIN(cmd_len, PACKET_SIZE - 1);
+	// 	memcpy(buf->data, command, copy_len);
+	// 	buf->data[copy_len] = '\0';
+	// 	buf->len = copy_len + 1;
+
+	// 	subevent_data_params[i].subevent = i;
+	// 	subevent_data_params[i].response_slot_start = 0;
+	// 	subevent_data_params[i].response_slot_count = NUM_RSP_SLOTS;
+	// 	subevent_data_params[i].data = buf;
+	// }
+
+	// err = bt_le_per_adv_set_subevent_data(pawr_adv, NUM_SUBEVENTS, subevent_data_params);
+	// APP_LOG("Command '%s' sent immediately to %d synced devices\n", command, active_devices);
+	// APP_LOG("Current active command: '%s'\n", current_command);
+
+	// return 0;
 }
 
 static void format_mac_hex(const uint8_t *mac,
@@ -1104,6 +1123,84 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		// APP_LOG("Tweak   : %d\n", APP_VERSION_TWEAK);
 		APP_LOG("======================================\n");
 	}
+	
+	else if (strncmp(cmd, "[+]list", 7) == 0 || strncmp(cmd, "list", 4) == 0)
+	{
+#define LIST_MAX_RANGE 20 /* serial protection: cap devices per request */
+
+		/* Parse: "list" | "list,<start>" | "list,<start>,<end>" */
+		int start_index = -1;
+		int end_index = -1;
+
+		const char *comma = strchr(cmd, ',');
+		if (comma)
+		{
+			start_index = atoi(comma + 1);
+
+			const char *comma2 = strchr(comma + 1, ',');
+			if (comma2)
+			{
+				end_index = atoi(comma2 + 1);
+			}
+			else
+			{
+				end_index = start_index; /* single index -> just that one */
+			}
+		}
+
+		/* Collect active slots so indices are contiguous 0..total-1
+		 * (slot numbers in the table can have gaps) */
+		int active_idx[MAX_SYNCS];
+		int total = 0;
+		for (int i = 0; i < MAX_SYNCS; i++)
+		{
+			if (synced_devices[i].active)
+			{
+				active_idx[total++] = i;
+			}
+		}
+
+		/* Bare "list" -> header only */
+		if (start_index < 0)
+		{
+			APP_LOG("[+]list,%d\n", total);
+			APP_LOG("[+]listend\n");
+			return;
+		}
+
+		/* Validate range */
+		if (start_index >= total || end_index < start_index)
+		{
+			APP_LOG("[+]list,err,invalid range (%d devices, valid 0-%d)\n",
+					total, total > 0 ? total - 1 : 0);
+			APP_LOG("[+]listend\n");
+			return;
+		}
+
+		/* Clamp end to available devices and to max chunk size */
+		if (end_index >= total)
+		{
+			end_index = total - 1;
+		}
+		if (end_index - start_index + 1 > LIST_MAX_RANGE)
+		{
+			end_index = start_index + LIST_MAX_RANGE - 1;
+		}
+
+		APP_LOG("[+]list,%d,%d,%d\n", total, start_index, end_index);
+
+		for (int n = start_index; n <= end_index; n++)
+		{
+			int i = active_idx[n];
+			APP_LOG("[+]dev,%d,%s,%d,%d\n",
+					n,
+					synced_devices[i].address,
+					synced_devices[i].subevent,
+					synced_devices[i].response_slot);
+		}
+
+		APP_LOG("[+]listend\n");
+	}
 	else if (strcmp(cmd, "help") == 0)
 	{
 		APP_LOG("\nAvailable commands:\n");
@@ -1266,6 +1363,8 @@ static void update_response_window_state(void)
 		APP_LOG("Response window expired\n");
 	}
 }
+
+
 static uint8_t current_response_subevent = 0;
 static void request_cb(struct bt_le_ext_adv *adv,
 					   const struct bt_le_per_adv_data_request *request)
@@ -1315,10 +1414,6 @@ static void request_cb(struct bt_le_ext_adv *adv,
 	// Handle temporary command expiry
 	update_temp_command_state();
 	update_response_window_state();
-	// APP_LOG("REQUEST_CB: temp=%d proto=%d current='%s'\n",
-	// 		temp_command_active,
-	// 		proto_command_active,
-	// 		current_command);
 
 	// Local copy of command
 	char cmd_local[CMD_BUF_SIZE];
@@ -1329,10 +1424,15 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 	to_send = MIN(request->count, ARRAY_SIZE(subevent_data_params));
 
+	/* Clamp instead of wrap — never produce a non-increasing subevent list */
+	uint8_t max_from_start = per_adv_params.num_subevents - request->start;
+	if (to_send > max_from_start) {
+		to_send = max_from_start;
+	}
+
 	for (size_t i = 0; i < to_send; i++)
 	{
-		uint8_t subevent =
-			(request->start + i) % per_adv_params.num_subevents;
+		uint8_t subevent = (request->start + i);// % per_adv_params.num_subevents;
 
 		buf = &bufs[i];
 
@@ -1349,9 +1449,7 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		}
 		else
 		{
-
 			const char *msg;
-
 			if (temp_command_active)
 			{
 				msg = cmd_local;
@@ -1386,11 +1484,12 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		}
 		subevent_data_params[i].data = buf;
 	}
-
+	// "[+]join,E1:CE:45:CC:AC:C4,CB:C3:09:B3:18:8E"
 	err = bt_le_per_adv_set_subevent_data(adv, to_send, subevent_data_params);
 	if (err)
 	{
-		APP_LOG("Failed to set PAwR command data (err %d)\n", err);
+	    APP_LOG("Failed to set PAwR command data (err %d) req_start=%u req_count=%u to_send=%u\n",
+            err, request->start, request->count, to_send);
 		return;
 	}
 
@@ -1419,9 +1518,11 @@ static void response_cb(struct bt_le_ext_adv *adv,
 	{
 		return;
 	}
-	APP_LOG("[RESP] se=%d slot=%d len=%d\n",
-			info->subevent, info->response_slot, buf->len);
-	// dump_raw_response(info, buf); /* remove once stable */
+
+	APP_LOG("[RESP] se=%d slot=%d len=%d raw=%s\n",
+			info->subevent, info->response_slot, buf->len,
+			bt_hex(buf->data, buf->len));
+	
 
 	/* 1. Identify device by its slot */
 	int idx = -1;
@@ -2380,7 +2481,7 @@ void main_thread(void *p1, void *p2, void *p3)
 
 	while (1)
 	{
-		k_sleep(K_SECONDS(5));
+		k_sleep(K_SECONDS(60));
 		cleanup_inactive_slots();
 	}
 }
@@ -2400,9 +2501,8 @@ int app_initilisation(void)
 		return 0;
 	}
 
-	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart30));
-	if (!device_is_ready(uart_dev))
-	{
+	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart20));
+	if (!device_is_ready(uart_dev)){
 		APP_LOG("UART device not ready!\n");
 		return 0;
 	}
@@ -2470,6 +2570,7 @@ int app_initilisation(void)
 
 	wdisc_pool_init(WDISC_POOL_SIZE);
 	k_mutex_init(&radio_mutex);
+	k_mutex_init(&synced_devices_mutex);
 
 	return 1;
 }

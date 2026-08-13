@@ -64,9 +64,10 @@ TIN_COLUMN = "TIN Number"
 MAC_COLUMN = "mac address"
 LINE_ENDING = "\r\n"
 READ_TIMEOUT = 2.0
-DELAY_BETWEEN_COMMANDS = 1.0
+DELAY_BETWEEN_COMMANDS = 5.0
 RESULT_PREFIX = "[+]res,"      # device lines starting with this are "wanted" results
 # -------------------------------------------------------------------------------------
+TEL_RESPONSE_TIMEOUT = 12.0   # near the other config constants at the top
 
 
 class SerialWorker(QThread):
@@ -84,6 +85,7 @@ class SerialWorker(QThread):
         self._running = True
         self._connect_params = None     # (port, baud) when a connect is requested
         self._disconnect_requested = False
+        self._last_res_mac = None          # <-- ADD: MAC from the latest [+]res line
 
     # ---------- called from the GUI thread ----------
     def request_connect(self, port, baud):
@@ -121,7 +123,7 @@ class SerialWorker(QThread):
             if self._queue and self.ser and self.ser.is_open:
                 digits, prefix, target_mac = self._queue.pop(0)
                 self._process_one(digits, prefix, target_mac)
-                if self._queue:
+                if self._queue and prefix != "[+]tel,":   # <-- TEL paces itself
                     # keep reading incoming data during the inter-command delay
                     end = time.time() + DELAY_BETWEEN_COMMANDS
                     while time.time() < end:
@@ -231,10 +233,45 @@ class SerialWorker(QThread):
                     # Bifurcate: wanted result lines also go to the Results panel
                     if decoded.startswith(RESULT_PREFIX):
                         self.result.emit(decoded)
+                        parts = decoded[len(RESULT_PREFIX):].split(",")
+                        if parts:
+                            self._last_res_mac = parts[0].strip().upper()
         except (serial.SerialException, OSError) as e:
             self.log.emit("ERROR", f"Serial read error: {e}")
             self._do_disconnect()
         return received
+    TEL_RESPONSE_TIMEOUT = 12.0   # near the other config constants at the top
+
+    def _process_one(self, digits, prefix, target_mac=None):
+        if self.df is None:
+            self.log.emit("ERROR", "No CSV sheet loaded.")
+            return
+        self.log.emit("INFO", f"Looking up TIN ending '{digits}'")
+        result, error = self._find_mac(digits)
+        if error:
+            self.log.emit("ERROR", error)
+            return
+        tin, mac = result
+        command = prefix + mac
+        if target_mac:
+            command += "," + target_mac
+        self.log.emit("INFO", f"Matched TIN: {tin}  MAC: {mac}")
+        self._send(command)
+
+        # --- TEL ONLY: block until THIS device's [+]res arrives ---
+        if prefix == "[+]tel,":
+            want = mac.strip().upper()
+            self._last_res_mac = None
+            deadline = time.time() + TEL_RESPONSE_TIMEOUT
+            while time.time() < deadline:
+                self._read_incoming()
+                if self._last_res_mac == want:
+                    self.log.emit("INFO",
+                                  f"[+]res received from {mac} — sending next command")
+                    return
+                time.sleep(0.02)
+            self.log.emit("WARN",
+                          f"No [+]res from {mac} within {TEL_RESPONSE_TIMEOUT:.0f}s — moving on")
 
 
 class MainWindow(QMainWindow):

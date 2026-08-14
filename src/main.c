@@ -21,16 +21,17 @@
 #include <zephyr/sys/util.h>
 
 /* Variable Declaration for Scanning Usage */
-#define DEVICE_NAME "PARALLEL"   //"TEST_SAMPLE"  // "PAwR sync sample"    "Internal_testing"
+#define DEVICE_NAME "PARALLEL1" //"TEST_SAMPLE"  // "PAwR sync sample"    "Internal_testing"
 
-#define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
-#define MAX_SCAN_RESULTS     20
-#define SCAN_WINDOW_SECONDS   10
+#define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
+#define MAX_SCAN_RESULTS 20
+#define SCAN_WINDOW_SECONDS 10
 
 /* ---- Result storage ---- */
-struct scan_result_t {
+struct scan_result_t
+{
 	bt_addr_le_t addr;
-	int8_t       rssi;
+	int8_t rssi;
 };
 
 static struct scan_result_t scan_results[MAX_SCAN_RESULTS];
@@ -39,14 +40,15 @@ static struct k_mutex results_mutex;
 static struct k_mutex radio_mutex;
 
 /* ---- Control primitives ---- */
-K_SEM_DEFINE(scan_done_sem, 0, 1);     /* signaled when 20 found, or on timeout fallback */
-K_SEM_DEFINE(scan_restart_sem, 0, 1);  /* external trigger to force a rescan */
+K_SEM_DEFINE(scan_done_sem, 0, 1);	  /* signaled when 20 found, or on timeout fallback */
+K_SEM_DEFINE(scan_restart_sem, 0, 1); /* external trigger to force a rescan */
 K_SEM_DEFINE(sem_remote_info, 0, 1);
 
 // Worker Thread
-struct wdisc_job {
-    bt_addr_le_t     addr;
-    struct bt_conn  *conn;   /* ref already held from bt_conn_le_create */
+struct wdisc_job
+{
+	bt_addr_le_t addr;
+	struct bt_conn *conn; /* ref already held from bt_conn_le_create */
 };
 
 static bool tel_all_active = false;
@@ -58,23 +60,24 @@ static bool tel_all_active = false;
 K_MSGQ_DEFINE(wdisc_job_q, sizeof(struct wdisc_job), WDISC_QUEUE_LEN, 4);
 K_MSGQ_DEFINE(scan_result_msgq, sizeof(struct scan_result_t), MAX_SCAN_RESULTS, 4);
 
-#define WDISC_POOL_SIZE 5      /* start here */
-#define WDISC_POOL_MAX  10     /* ceiling you can bump to */
+#define WDISC_POOL_SIZE 5 /* start here */
+#define WDISC_POOL_MAX 10 /* ceiling you can bump to */
 
-struct wdisc_worker {
-    int id;
-    struct k_thread thread;
-    k_tid_t tid;
+struct wdisc_worker
+{
+	int id;
+	struct k_thread thread;
+	k_tid_t tid;
 
-    struct bt_conn *conn;                       /* conn this worker is currently handling */
+	struct bt_conn *conn; /* conn this worker is currently handling */
 
-    struct bt_gatt_discover_params discover_params;
-    struct bt_gatt_write_params    write_params;
+	struct bt_gatt_discover_params discover_params;
+	struct bt_gatt_write_params write_params;
 
-    struct k_sem sem_discovered;
-    struct k_sem sem_written;
-    struct k_sem sem_remote_info;
-    uint16_t pawr_attr_handle;
+	struct k_sem sem_discovered;
+	struct k_sem sem_written;
+	struct k_sem sem_remote_info;
+	uint16_t pawr_attr_handle;
 };
 
 /* Thread Declarations */
@@ -116,7 +119,7 @@ static struct bt_le_conn_param *fast_conn_param =
 	BT_LE_CONN_PARAM(0x0010, 0x0010, 5, 1000); /* 20ms fixed interval, latency 0, 4s timeout */
 
 static struct bt_conn_le_create_param *fast_create_param =
-BT_CONN_LE_CREATE_PARAM(BT_CONN_LE_OPT_NONE, BT_GAP_SCAN_FAST_INTERVAL,BT_GAP_SCAN_FAST_INTERVAL);
+	BT_CONN_LE_CREATE_PARAM(BT_CONN_LE_OPT_NONE, BT_GAP_SCAN_FAST_INTERVAL, BT_GAP_SCAN_FAST_INTERVAL);
 
 static int nvs_init_app(void)
 {
@@ -152,8 +155,8 @@ static bool logs_enabled = true;
 int parse_mac(const char *str, uint8_t *mac)
 {
 	return sscanf(str, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-				&mac[0], &mac[1], &mac[2],
-				&mac[3], &mac[4], &mac[5]);
+				  &mac[0], &mac[1], &mac[2],
+				  &mac[3], &mac[4], &mac[5]);
 }
 
 static void conn_state_check_cb(struct bt_conn *conn, void *user_data)
@@ -162,7 +165,8 @@ static void conn_state_check_cb(struct bt_conn *conn, void *user_data)
 	struct bt_conn_info info;
 
 	if (bt_conn_get_info(conn, &info) == 0 &&
-	    info.state == BT_CONN_STATE_CONNECTING) {
+		info.state == BT_CONN_STATE_CONNECTING)
+	{
 		*busy = true;
 	}
 }
@@ -180,45 +184,50 @@ static bool connect_in_progress(void)
 
 bool wait_for_connected_state(struct bt_conn *conn, int timeout_ms)
 {
-    int elapsed = 0;
-    struct bt_conn_info info;
+	int elapsed = 0;
+	struct bt_conn_info info;
 
-    while (elapsed < timeout_ms) {
-        int err = bt_conn_get_info(conn, &info);
-        if (err) {
-            APP_LOG("Failed to get conn info (err %d)\n", err);
-            return false;
-        }
+	while (elapsed < timeout_ms)
+	{
+		int err = bt_conn_get_info(conn, &info);
+		if (err)
+		{
+			APP_LOG("Failed to get conn info (err %d)\n", err);
+			return false;
+		}
 
-        if (info.state == BT_CONN_STATE_CONNECTED) {
-            APP_LOG("Conn state: CONNECTED (took ~%d ms)\n", elapsed);
-            APP_LOG("Interval: %d (%d.%02d ms), latency: %d, timeout: %d\n",
-                    info.le.interval,
-                    (info.le.interval * 125) / 100,
-                    (info.le.interval * 125) % 100,
-                    info.le.latency, info.le.timeout);
-            return true;
-        }
+		if (info.state == BT_CONN_STATE_CONNECTED)
+		{
+			APP_LOG("Conn state: CONNECTED (took ~%d ms)\n", elapsed);
+			APP_LOG("Interval: %d (%d.%02d ms), latency: %d, timeout: %d\n",
+					info.le.interval,
+					(info.le.interval * 125) / 100,
+					(info.le.interval * 125) % 100,
+					info.le.latency, info.le.timeout);
+			return true;
+		}
 
-        if (info.state == BT_CONN_STATE_DISCONNECTED) {
-            APP_LOG("Conn state: DISCONNECTED while waiting — aborting\n");
-            return false;
-        }
+		if (info.state == BT_CONN_STATE_DISCONNECTED)
+		{
+			APP_LOG("Conn state: DISCONNECTED while waiting — aborting\n");
+			return false;
+		}
 
-        k_sleep(K_MSEC(CONN_POLL_INTERVAL_MS));
-        elapsed += CONN_POLL_INTERVAL_MS;
-    }
+		k_sleep(K_MSEC(CONN_POLL_INTERVAL_MS));
+		elapsed += CONN_POLL_INTERVAL_MS;
+	}
 
-    APP_LOG("Timed out waiting for connection (state=%d)\n", info.state);
-    return false;
+	APP_LOG("Timed out waiting for connection (state=%d)\n", info.state);
+	return false;
 }
-
 
 /* Helper Function for the Scanning */
 static bool addr_already_present(const bt_addr_le_t *addr)
 {
-	for (int i = 0; i < scan_result_count; i++) {
-		if (bt_addr_le_cmp(&scan_results[i].addr, addr) == 0) {
+	for (int i = 0; i < scan_result_count; i++)
+	{
+		if (bt_addr_le_cmp(&scan_results[i].addr, addr) == 0)
+		{
 			return true;
 		}
 	}
@@ -226,7 +235,8 @@ static bool addr_already_present(const bt_addr_le_t *addr)
 }
 
 /* AD data parsing callback for bt_data_parse */
-struct name_check_ctx {
+struct name_check_ctx
+{
 	bool match;
 };
 
@@ -235,9 +245,11 @@ static bool ad_parse_cb(struct bt_data *data, void *user_data)
 	struct name_check_ctx *ctx = user_data;
 
 	if (data->type == BT_DATA_NAME_COMPLETE ||
-		data->type == BT_DATA_NAME_SHORTENED) {
+		data->type == BT_DATA_NAME_SHORTENED)
+	{
 		if (data->data_len == DEVICE_NAME_LEN &&
-			memcmp(data->data, DEVICE_NAME, DEVICE_NAME_LEN) == 0) {
+			memcmp(data->data, DEVICE_NAME, DEVICE_NAME_LEN) == 0)
+		{
 			ctx->match = true;
 			return false; /* stop parsing, found it */
 		}
@@ -247,7 +259,7 @@ static bool ad_parse_cb(struct bt_data *data, void *user_data)
 
 static bool name_matches(struct net_buf_simple *ad)
 {
-	struct name_check_ctx ctx = { .match = false };
+	struct name_check_ctx ctx = {.match = false};
 	struct net_buf_simple ad_copy;
 
 	/* bt_data_parse consumes the buffer, so work on a copy */
@@ -302,7 +314,7 @@ static struct bt_le_ext_adv *pawr_adv = NULL;
 BUILD_ASSERT(ARRAY_SIZE(bufs) == ARRAY_SIZE(subevent_data_params));
 BUILD_ASSERT(ARRAY_SIZE(backing_store) == ARRAY_SIZE(subevent_data_params));
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
-						struct net_buf_simple *ad);
+						 struct net_buf_simple *ad);
 struct pawr_timing
 {
 	uint8_t subevent;
@@ -335,13 +347,13 @@ enum pawr_device_state
 // Structure to store synced device information
 struct synced_device
 {
-	bool active;							// whether you recieved any responce or not. //after timeout it will be inactive
-	enum pawr_device_state state;			// disconnected, synced , verifying
-	uint8_t subevent;						// subevent is what we are assigning
-	uint8_t response_slot;					// response is what we are assining
+	bool active;				  // whether you recieved any responce or not. //after timeout it will be inactive
+	enum pawr_device_state state; // disconnected, synced , verifying
+	uint8_t subevent;			  // subevent is what we are assigning
+	uint8_t response_slot;		  // response is what we are assining
 
-	char address[ADDR_STR_LEN]; 			// BT addr as string (from onboarding)
-	int64_t last_update_time;			
+	char address[ADDR_STR_LEN]; // BT addr as string (from onboarding)
+	int64_t last_update_time;
 	int64_t last_response_time;
 	int64_t last_sync_time;
 	bool active_check_pending;
@@ -553,17 +565,17 @@ static int send_command_to_synced_devices(struct bt_le_ext_adv *pawr_adv, const 
 }
 
 static void format_mac_hex(const uint8_t *mac,
-						char *out,
-						size_t out_size)
+						   char *out,
+						   size_t out_size)
 {
 	snprintf(out,
-			out_size,
-			"%02X:%02X:%02X:%02X:%02X:%02X",
-			mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+			 out_size,
+			 "%02X:%02X:%02X:%02X:%02X:%02X",
+			 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 static bool decode_tel_response(const uint8_t *data, size_t len,
-	char *mac_out, size_t mac_out_size,
+								char *mac_out, size_t mac_out_size,
 								char *meta_out, size_t meta_out_size)
 {
 	Command msg = Command_init_zero;
@@ -585,73 +597,114 @@ static bool decode_tel_response(const uint8_t *data, size_t len,
 	return true;
 }
 
-bool encode_command_with_mac(uint16_t which_cmd, uint8_t *mac, uint8_t *ots_mac, const char *label){
-    Command cmd = Command_init_zero;
-    cmd.request_id = 1;
-    cmd.which_cmd = which_cmd;
+static bool decode_cmd_ack(const uint8_t *data, size_t len,
+						   char *mac_out, size_t mac_out_size,
+						   uint32_t *status_out, CmdType *type_out)
+{
+	Command msg = Command_init_zero;
+	pb_istream_t stream = pb_istream_from_buffer(data, len);
 
-    switch (which_cmd)
-    {
-    case Command_led_tag:
-        memcpy(cmd.cmd.led.mac.bytes, mac, 6);
-        cmd.cmd.led.mac.size = 6;
-        break;
+	if (!pb_decode(&stream, Command_fields, &msg))
+		return false;
 
-    case Command_default_image_tag:
-        memcpy(cmd.cmd.default_image.mac.bytes, mac, 6);
-        cmd.cmd.default_image.mac.size = 6;
-        break;
+	if (msg.which_cmd != Command_cmd_ack_tag)
+		return false;
 
-    case Command_clear_epd_tag:
-        memcpy(cmd.cmd.clear_epd.mac.bytes, mac, 6);
-        cmd.cmd.clear_epd.mac.size = 6;
-        break;
+	if (msg.cmd.cmd_ack.mac.size != 6)
+		return false;
 
-    case Command_tel_tag:
-        memcpy(cmd.cmd.tel.mac.bytes, mac, 6);
-        cmd.cmd.tel.mac.size = 6;
-        break;
+	format_mac_hex(msg.cmd.cmd_ack.mac.bytes, mac_out, mac_out_size);
+	*status_out = msg.cmd.cmd_ack.status;
+	*type_out = msg.cmd.cmd_ack.cmd_type;
 
-    case Command_join_tag:
-        memcpy(cmd.cmd.join.mac.bytes, mac, 6);
-        cmd.cmd.join.mac.size = 6;
-        if (ots_mac)
-        {
-            memcpy(cmd.cmd.join.ots_mac.bytes, ots_mac, 6);
-            cmd.cmd.join.ots_mac.size = 6;
-        }
-        break;
+	return true;
+}
 
-    case Command_ota_tag:
-        memcpy(cmd.cmd.ota.mac.bytes, mac, 6);
-        cmd.cmd.ota.mac.size = 6;
-        if (ots_mac)
-        {
-            memcpy(cmd.cmd.ota.ots_mac.bytes, ots_mac, 6);
-            cmd.cmd.ota.ots_mac.size = 6;
-        }
-        break;
+static const char *cmd_type_name(CmdType t)
+{
+	switch (t)
+	{
+	case CmdType_CMD_LED:
+		return "led";
+	case CmdType_CMD_SPLASH:
+		return "splash";
+	case CmdType_CMD_CLEAR:
+		return "clear";
+	case CmdType_CMD_OTA:
+		return "ota";
+	default:
+		return "cmd";
+	}
+}
 
-    default:
-        APP_LOG("%s: unknown command tag %d\n", label, (int)which_cmd);
-        proto_len = 0;
-        proto_command_active = false;
-        return false;
-    }
+bool encode_command_with_mac(uint16_t which_cmd, uint8_t *mac, uint8_t *ots_mac, const char *label)
+{
+	Command cmd = Command_init_zero;
+	cmd.request_id = 1;
+	cmd.which_cmd = which_cmd;
 
-    pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
-    if (!pb_encode(&stream, Command_fields, &cmd))
-    {
-        APP_LOG("%s encode failed\n", label);
-        proto_len = 0;
-        proto_command_active = false;
-        return false;
-    }
+	switch (which_cmd)
+	{
+	case Command_led_tag:
+		memcpy(cmd.cmd.led.mac.bytes, mac, 6);
+		cmd.cmd.led.mac.size = 6;
+		break;
 
-    proto_len = stream.bytes_written;
-    proto_command_active = true;
-    APP_LOG("%s proto len: %d\n", label, (int)proto_len);
-    return true;
+	case Command_default_image_tag:
+		memcpy(cmd.cmd.default_image.mac.bytes, mac, 6);
+		cmd.cmd.default_image.mac.size = 6;
+		break;
+
+	case Command_clear_epd_tag:
+		memcpy(cmd.cmd.clear_epd.mac.bytes, mac, 6);
+		cmd.cmd.clear_epd.mac.size = 6;
+		break;
+
+	case Command_tel_tag:
+		memcpy(cmd.cmd.tel.mac.bytes, mac, 6);
+		cmd.cmd.tel.mac.size = 6;
+		break;
+
+	case Command_join_tag:
+		memcpy(cmd.cmd.join.mac.bytes, mac, 6);
+		cmd.cmd.join.mac.size = 6;
+		if (ots_mac)
+		{
+			memcpy(cmd.cmd.join.ots_mac.bytes, ots_mac, 6);
+			cmd.cmd.join.ots_mac.size = 6;
+		}
+		break;
+
+	case Command_ota_tag:
+		memcpy(cmd.cmd.ota.mac.bytes, mac, 6);
+		cmd.cmd.ota.mac.size = 6;
+		if (ots_mac)
+		{
+			memcpy(cmd.cmd.ota.ots_mac.bytes, ots_mac, 6);
+			cmd.cmd.ota.ots_mac.size = 6;
+		}
+		break;
+
+	default:
+		APP_LOG("%s: unknown command tag %d\n", label, (int)which_cmd);
+		proto_len = 0;
+		proto_command_active = false;
+		return false;
+	}
+
+	pb_ostream_t stream = pb_ostream_from_buffer(proto_buf, sizeof(proto_buf));
+	if (!pb_encode(&stream, Command_fields, &cmd))
+	{
+		APP_LOG("%s encode failed\n", label);
+		proto_len = 0;
+		proto_command_active = false;
+		return false;
+	}
+
+	proto_len = stream.bytes_written;
+	proto_command_active = true;
+	APP_LOG("%s proto len: %d\n", label, (int)proto_len);
+	return true;
 }
 
 // Function to parse and handle commands
@@ -668,9 +721,9 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		uint8_t ots_mac[6];
 
 		if (sscanf(cmd,
-				"[+]join,%31[^,],%31s",
-				esl_mac_str,
-				ots_mac_str) != 2)
+				   "[+]join,%31[^,],%31s",
+				   esl_mac_str,
+				   ots_mac_str) != 2)
 		{
 			APP_LOG("Invalid join format\n");
 			APP_LOG("Expected: [+]join,<esl_mac>,<ots_mac>\n");
@@ -803,9 +856,9 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		uint8_t ots_mac[6];
 
 		if (sscanf(cmd,
-				"[+]ota,%31[^,],%31s",
-				esl_mac_str,
-				ots_mac_str) != 2)
+				   "[+]ota,%31[^,],%31s",
+				   esl_mac_str,
+				   ots_mac_str) != 2)
 		{
 			APP_LOG("Invalid OTA format\n");
 			APP_LOG("Expected: [+]ota,<esl_mac>,<ots_mac>\n");
@@ -895,10 +948,12 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		uint8_t bcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 		encode_command_with_mac(Command_tel_tag, bcast_mac, NULL, "PING ALL");
 
-		if (proto_command_active && proto_len > 0){
+		if (proto_command_active && proto_len > 0)
+		{
 			APP_LOG("[+]TEL_ALL_PROTO_READY len=%d\n", (int)proto_len);
 		}
-		else{
+		else
+		{
 			tel_all_active = false;
 			APP_LOG("[TEL_ALL] ERROR: protobuf encoding failed\n");
 		}
@@ -1000,9 +1055,9 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 			uint8_t flag = 1;
 
 			nvs_write(&fs,
-					NVS_ID_MCUMGR_MODE,
-					&flag,
-					sizeof(flag));
+					  NVS_ID_MCUMGR_MODE,
+					  &flag,
+					  sizeof(flag));
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 		else
@@ -1083,14 +1138,15 @@ static void update_response_window_state(void)
 	}
 
 	int64_t now = k_uptime_get();
-	if (now >= response_window_expiry_ms){
+	if (now >= response_window_expiry_ms)
+	{
 		response_window_active = false;
 		APP_LOG("Response window expired\n");
 	}
 }
 
 static void request_cb(struct bt_le_ext_adv *adv,
-					const struct bt_le_per_adv_data_request *request)
+					   const struct bt_le_per_adv_data_request *request)
 {
 	int err;
 	uint8_t to_send;
@@ -1098,7 +1154,7 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 	update_temp_command_state();
 	update_response_window_state();
-	
+
 	char cmd_local[CMD_BUF_SIZE];
 	strncpy(cmd_local, current_command, CMD_BUF_SIZE - 1);
 	cmd_local[CMD_BUF_SIZE - 1] = '\0';
@@ -1203,44 +1259,60 @@ static void response_cb(struct bt_le_ext_adv *adv,
 						struct net_buf_simple *buf)
 {
 	ARG_UNUSED(adv);
-	if (!buf){
+	if (!buf)
+	{
 		return;
 	}
 
 	// {
-		/* Print data in the hex and the ascii */
-		char hex_str[3 * PACKET_SIZE + 1] = {0};
-		char ascii_str[PACKET_SIZE + 1] = {0};
-		size_t n = MIN(buf->len, PACKET_SIZE);
-		size_t pos = 0;
+	/* Print data in the hex and the ascii */
+	char hex_str[3 * PACKET_SIZE + 1] = {0};
+	char ascii_str[PACKET_SIZE + 1] = {0};
+	size_t n = MIN(buf->len, PACKET_SIZE);
+	size_t pos = 0;
 
-		for (size_t i = 0; i < n; i++)
-		{
-			pos += snprintf(&hex_str[pos], sizeof(hex_str) - pos,
-							 "%02X ", buf->data[i]);
-			uint8_t b = buf->data[i];
-			ascii_str[i] = (b >= 32 && b <= 126) ? (char)b : '.';
-		}
-		ascii_str[n] = '\0';
+	for (size_t i = 0; i < n; i++)
+	{
+		pos += snprintf(&hex_str[pos], sizeof(hex_str) - pos,
+						"%02X ", buf->data[i]);
+		uint8_t b = buf->data[i];
+		ascii_str[i] = (b >= 32 && b <= 126) ? (char)b : '.';
+	}
+	ascii_str[n] = '\0';
 
-		APP_LOG("[RESP] se=%d slot=%d raw[%d]: hex=[%s]\n",
-				info->subevent, info->response_slot, buf->len,
-				hex_str);
+	APP_LOG("[RESP] se=%d slot=%d raw[%d]: hex=[%s]\n",
+			info->subevent, info->response_slot, buf->len,
+			hex_str);
 	// }
 
-	if(buf->len > 3){
-			char tel_mac[24] = {0};
+	if (buf->len > 3)
+	{
+		char tel_mac[24] = {0};
 		char tel_meta[64] = {0};
-	if (decode_tel_response(buf->data,
-							buf->len,
-							tel_mac,
-							sizeof(tel_mac),
-							tel_meta,
-							sizeof(tel_meta))){
-		APP_LOG("decoded information is : mac=%s meta=%s\n", tel_mac, tel_meta);
-		}else{
-			APP_LOG("decoding failed, %s\n", ascii_str);
-		}	
+
+		if (decode_tel_response(buf->data, buf->len,
+								tel_mac, sizeof(tel_mac),
+								tel_meta, sizeof(tel_meta)))
+		{
+			APP_LOG("[+]tel,%s,%s\n", tel_mac, tel_meta);
+		}
+		else
+		{
+			char ack_mac[24] = {0};
+			uint32_t status = 0;
+			CmdType type = CmdType_CMD_UNKNOWN;
+
+			if (decode_cmd_ack(buf->data, buf->len,
+							   ack_mac, sizeof(ack_mac),
+							   &status, &type))
+			{
+				APP_LOG("[+]%s,%s\n", cmd_type_name(type), ack_mac);
+			}
+			else
+			{
+				APP_LOG("decoding failed, %s\n", ascii_str);
+			}
+		}
 	}
 
 	// if (buf && buf->len > 0)
@@ -1395,16 +1467,17 @@ static void response_cb(struct bt_le_ext_adv *adv,
 
 static const struct bt_le_ext_adv_cb adv_cb = {
 	.pawr_data_request = request_cb, // pap to esl
-	.pawr_response = response_cb,	// esl to pap
+	.pawr_response = response_cb,	 // esl to pap
 };
-
 
 static bool conn_is_live(struct bt_conn *conn)
 {
-    if (!conn) return false;
-    struct bt_conn_info info;
-    if (bt_conn_get_info(conn, &info)) return false;
-    return info.state == BT_CONN_STATE_CONNECTED;
+	if (!conn)
+		return false;
+	struct bt_conn_info info;
+	if (bt_conn_get_info(conn, &info))
+		return false;
+	return info.state == BT_CONN_STATE_CONNECTED;
 }
 
 int64_t startTime = 0;
@@ -1412,35 +1485,37 @@ int64_t endTime = 0;
 
 void connected_cb(struct bt_conn *conn, uint8_t err)
 {
-	if (err) { 
+	if (err)
+	{
 		APP_LOG("Connection failed (err 0x%02X), elapsed %lld ms\n",
 				err, endTime - startTime);
 
 		bt_conn_unref(conn);
 		conn = NULL;
-		
+
 		k_sem_give(&sem_connected);
-		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
-		return;		
+		k_sem_give(&sem_disconnected); /* signal AFTER this thread is truly done */
+		return;
 	}
 
 	struct wdisc_job job;
-    bt_addr_le_copy(&job.addr, bt_conn_get_dst(conn));
-    job.conn = conn; /* default_conn already holds the ref from bt_conn_le_create */
+	bt_addr_le_copy(&job.addr, bt_conn_get_dst(conn));
+	job.conn = conn; /* default_conn already holds the ref from bt_conn_le_create */
 
-    char addr_str[BT_ADDR_LE_STR_LEN];
-    bt_addr_le_to_str(&job.addr, addr_str, sizeof(addr_str));
-    APP_LOG("Connected CB: connection established for %s\n", addr_str);
+	char addr_str[BT_ADDR_LE_STR_LEN];
+	bt_addr_le_to_str(&job.addr, addr_str, sizeof(addr_str));
+	APP_LOG("Connected CB: connection established for %s\n", addr_str);
 
-    if (k_msgq_put(&wdisc_job_q, &job, K_NO_WAIT) != 0) {
-        APP_LOG("wdisc queue full, dropping connection %s\n", addr_str);
-        bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-        bt_conn_unref(conn);
-        conn = NULL;
-		k_sem_give(&sem_connected);      /* wake gatt_thread NOW, not after 10s */
-        k_sem_give(&sem_disconnected);
-        return;
-    }
+	if (k_msgq_put(&wdisc_job_q, &job, K_NO_WAIT) != 0)
+	{
+		APP_LOG("wdisc queue full, dropping connection %s\n", addr_str);
+		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		bt_conn_unref(conn);
+		conn = NULL;
+		k_sem_give(&sem_connected); /* wake gatt_thread NOW, not after 10s */
+		k_sem_give(&sem_disconnected);
+		return;
+	}
 
 	k_sem_give(&sem_connected);
 }
@@ -1448,24 +1523,28 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
 	if (reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
-	    reason == BT_HCI_ERR_LOCALHOST_TERM_CONN) {
-			/* graceful, expected */
-	} else if (reason == BT_HCI_ERR_CONN_TIMEOUT) {
+		reason == BT_HCI_ERR_LOCALHOST_TERM_CONN)
+	{
+		/* graceful, expected */
+	}
+	else if (reason == BT_HCI_ERR_CONN_TIMEOUT)
+	{
 		APP_LOG("Supervision timeout for this device — link dropped abnormally\n");
 		/* consider: mark this MAC for a longer backoff/cooldown before
 		 * scan_thread re-attempts a connect, since the controller may
 		 * need time to release resources internally */
 	}
 
-    char addr_str[BT_ADDR_LE_STR_LEN];
-    const bt_addr_le_t *dev_addr = bt_conn_get_dst(conn);
-	
-	if (dev_addr) {
-        bt_addr_le_to_str(dev_addr, addr_str, sizeof(addr_str));
-    }
+	char addr_str[BT_ADDR_LE_STR_LEN];
+	const bt_addr_le_t *dev_addr = bt_conn_get_dst(conn);
+
+	if (dev_addr)
+	{
+		bt_addr_le_to_str(dev_addr, addr_str, sizeof(addr_str));
+	}
 
 	APP_LOG("Disconnected CB : %s, reason 0x%02X %s\n\n",
-            dev_addr ? addr_str : "(unknown)", reason, bt_hci_err_to_str(reason));
+			dev_addr ? addr_str : "(unknown)", reason, bt_hci_err_to_str(reason));
 
 	if (conn && dev_addr)
 	{
@@ -1490,9 +1569,11 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 		}
 	}
 
-		/* NEW: wake the owning worker immediately, whichever wait it's in */
-	for (int i = 0; i < wdisc_pool_size; i++) {
-		if (wdisc_workers[i].conn == conn) {
+	/* NEW: wake the owning worker immediately, whichever wait it's in */
+	for (int i = 0; i < wdisc_pool_size; i++)
+	{
+		if (wdisc_workers[i].conn == conn)
+		{
 			k_sem_give(&wdisc_workers[i].sem_remote_info);
 			k_sem_give(&wdisc_workers[i].sem_discovered);
 			k_sem_give(&wdisc_workers[i].sem_written);
@@ -1507,12 +1588,14 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 
 void remote_info_available_cb(struct bt_conn *conn, struct bt_conn_remote_info *remote_info)
 {
-   for (int i = 0; i < wdisc_pool_size; i++) {
-        if (wdisc_workers[i].conn == conn) {
-            k_sem_give(&wdisc_workers[i].sem_remote_info);
-            return;
-        }
-    }
+	for (int i = 0; i < wdisc_pool_size; i++)
+	{
+		if (wdisc_workers[i].conn == conn)
+		{
+			k_sem_give(&wdisc_workers[i].sem_remote_info);
+			return;
+		}
+	}
 }
 
 BT_CONN_CB_DEFINE(conn_cb) = {
@@ -1522,17 +1605,21 @@ BT_CONN_CB_DEFINE(conn_cb) = {
 };
 
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
-						struct net_buf_simple *ad){
-	if (!scanning_enabled) {
+						 struct net_buf_simple *ad)
+{
+	if (!scanning_enabled)
+	{
 		return;
 	}
 
-	if (!name_matches(ad)) {
+	if (!name_matches(ad))
+	{
 		return;
 	}
 	k_mutex_lock(&results_mutex, K_FOREVER);
 	if (scan_result_count < MAX_SCAN_RESULTS &&
-		!addr_already_present(addr)) {
+		!addr_already_present(addr))
+	{
 
 		bt_addr_le_copy(&scan_results[scan_result_count].addr, addr);
 		scan_results[scan_result_count].rssi = rssi;
@@ -1543,7 +1630,8 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 		APP_LOG("Matched device %d/%d: %s rssi %d\n",
 				scan_result_count, MAX_SCAN_RESULTS, addr_str, rssi);
 
-		if (scan_result_count >= MAX_SCAN_RESULTS) {
+		if (scan_result_count >= MAX_SCAN_RESULTS)
+		{
 			k_sem_give(&scan_done_sem); /* early exit: 20 found */
 		}
 	}
@@ -1555,11 +1643,13 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 
 static void flush_results_to_queue(void)
 {
-	k_sleep(K_SECONDS(2));   /* check again periodically */
+	k_sleep(K_SECONDS(2)); /* check again periodically */
 	k_mutex_lock(&results_mutex, K_FOREVER);
-	for (int i = 0; i < scan_result_count; i++) {
+	for (int i = 0; i < scan_result_count; i++)
+	{
 		int ret = k_msgq_put(&scan_result_msgq, &scan_results[i], K_NO_WAIT);
-		if (ret != 0) {
+		if (ret != 0)
+		{
 			APP_LOG("msgq full, dropping result %d (err %d)\n", i, ret);
 		}
 	}
@@ -1571,30 +1661,33 @@ static void flush_results_to_queue(void)
 }
 
 static uint8_t discover_func(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-							struct bt_gatt_discover_params *params)
+							 struct bt_gatt_discover_params *params)
 {
 	struct wdisc_worker *self = CONTAINER_OF(params, struct wdisc_worker, discover_params);
 
-	if (!attr) {
-        k_sem_give(&self->sem_discovered);
-        return BT_GATT_ITER_STOP;
-    }
+	if (!attr)
+	{
+		k_sem_give(&self->sem_discovered);
+		return BT_GATT_ITER_STOP;
+	}
 
-    struct bt_gatt_chrc *chrc = (struct bt_gatt_chrc *)attr->user_data;
-    if (!bt_uuid_cmp(chrc->uuid, &pawr_char_uuid.uuid)) {
-        self->pawr_attr_handle = chrc->value_handle;
-        k_sem_give(&self->sem_discovered);
-    }
+	struct bt_gatt_chrc *chrc = (struct bt_gatt_chrc *)attr->user_data;
+	if (!bt_uuid_cmp(chrc->uuid, &pawr_char_uuid.uuid))
+	{
+		self->pawr_attr_handle = chrc->value_handle;
+		k_sem_give(&self->sem_discovered);
+	}
 
 	return BT_GATT_ITER_STOP;
 }
 
 static void write_func(struct bt_conn *conn, uint8_t err, struct bt_gatt_write_params *params)
 {
-    struct wdisc_worker *self = CONTAINER_OF(params, struct wdisc_worker, write_params);
-    if (!err) {
-        k_sem_give(&self->sem_written);
-    }
+	struct wdisc_worker *self = CONTAINER_OF(params, struct wdisc_worker, write_params);
+	if (!err)
+	{
+		k_sem_give(&self->sem_written);
+	}
 }
 
 void init_bufs(void)
@@ -1607,8 +1700,8 @@ void init_bufs(void)
 		backing_store[i][3] = 0x00;
 
 		net_buf_simple_init_with_data(&bufs[i],
-									&backing_store[i],
-									ARRAY_SIZE(backing_store[i]));
+									  &backing_store[i],
+									  ARRAY_SIZE(backing_store[i]));
 	}
 }
 
@@ -1648,10 +1741,10 @@ void cleanup_inactive_slots(void)
 				char cmd[64];
 
 				snprintf(cmd,
-						sizeof(cmd),
-						"ACTIVE,%s",
+						 sizeof(cmd),
+						 "ACTIVE,%s",
 
-						synced_devices[i].address);
+						 synced_devices[i].address);
 
 				strncpy(current_command, cmd, CMD_BUF_SIZE - 1);
 				current_command[CMD_BUF_SIZE - 1] = '\0';
@@ -1699,7 +1792,7 @@ void cleanup_inactive_slots(void)
 		{
 			APP_LOG("Cleaning up inactive slot %d\n", i);
 			memset(synced_devices[i].address, 0,
-				sizeof(synced_devices[i].address));
+				   sizeof(synced_devices[i].address));
 			synced_devices[i].subevent = INVALID_SLOT;
 			synced_devices[i].response_slot = INVALID_SLOT;
 		}
@@ -1746,26 +1839,30 @@ void restart_advertising(void)
 	}
 }
 
-void scan_thread(void *p1, void *p2, void *p3){
+void scan_thread(void *p1, void *p2, void *p3)
+{
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
-	
+
 	const char *tag_name = "SCAN_THREAD";
-	APP_LOG("%s :  Scanning Thread Started \n",tag_name);
+	APP_LOG("%s :  Scanning Thread Started \n", tag_name);
 	scanning_enabled = true;
 	k_mutex_init(&results_mutex);
 
-	while(1){
-	   /* Don't scan if all slots are already allocated */
-		if (num_synced >= MAX_SYNCS) {
+	while (1)
+	{
+		/* Don't scan if all slots are already allocated */
+		if (num_synced >= MAX_SYNCS)
+		{
 			APP_LOG("%s : All %d slots full, pausing scan\n", tag_name, MAX_SYNCS);
-			k_sleep(K_SECONDS(2));   /* check again periodically */
+			k_sleep(K_SECONDS(2)); /* check again periodically */
 			continue;
 		}
-	
+
 		bool queue_empty = (k_msgq_num_used_get(&scan_result_msgq) == 0);
-		if (!queue_empty) {
+		if (!queue_empty)
+		{
 			/* Block here until either queue drains or someone forces a restart */
 			k_sem_take(&scan_restart_sem, K_FOREVER);
 		}
@@ -1773,14 +1870,16 @@ void scan_thread(void *p1, void *p2, void *p3){
 		scan_result_count = 0;
 
 		int err;
-		for (;;) {
+		for (;;)
+		{
 			k_mutex_lock(&radio_mutex, K_FOREVER);
 
-			if (!atomic_get(&conn_activity) && !connect_in_progress()) {
+			if (!atomic_get(&conn_activity) && !connect_in_progress())
+			{
 				/* Radio is free — start scan while still holding the lock */
 				scanning_enabled = true;
 				err = bt_le_scan_start(BT_LE_SCAN_PASSIVE_CONTINUOUS,
-						       device_found);
+									   device_found);
 				k_mutex_unlock(&radio_mutex);
 				break;
 			}
@@ -1791,13 +1890,14 @@ void scan_thread(void *p1, void *p2, void *p3){
 			k_sem_take(&radio_free_sem, K_MSEC(500));
 		}
 
-		if (err) {
-			APP_LOG("%s :  bt_le_scan_start failed (err %d) \n",tag_name, err);
+		if (err)
+		{
+			APP_LOG("%s :  bt_le_scan_start failed (err %d) \n", tag_name, err);
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
 
-		APP_LOG("%s : Scan window started (%ds max, 20 devices max) \n",tag_name, SCAN_WINDOW_SECONDS);
+		APP_LOG("%s : Scan window started (%ds max, 20 devices max) \n", tag_name, SCAN_WINDOW_SECONDS);
 
 		/* Wait for either: 20 devices found, or 5s timeout */
 		k_sem_take(&scan_done_sem, K_SECONDS(SCAN_WINDOW_SECONDS));
@@ -1805,7 +1905,8 @@ void scan_thread(void *p1, void *p2, void *p3){
 		bt_le_scan_stop();
 		APP_LOG("%s :Scan window ended, %d device(s) collected\n", tag_name, scan_result_count);
 
-		if (scan_result_count > 0) {
+		if (scan_result_count > 0)
+		{
 			flush_results_to_queue();
 		}
 	}
@@ -1823,40 +1924,46 @@ static void process_scan_item(struct scan_result_t *item, const char *addr_str)
 	k_mutex_lock(&radio_mutex, K_FOREVER);
 	atomic_set(&conn_activity, 1);
 	scanning_enabled = false;
-	bt_le_scan_stop();   /* kills any scan that snuck in; -EALREADY harmless */
+	bt_le_scan_stop(); /* kills any scan that snuck in; -EALREADY harmless */
 
 	err = bt_conn_le_create(&item->addr, fast_create_param,
-				fast_conn_param, &new_conn);
-	k_mutex_unlock(&radio_mutex);   /* unconditional — before any return */
+							fast_conn_param, &new_conn);
+	k_mutex_unlock(&radio_mutex); /* unconditional — before any return */
 
-	if (err) {
+	if (err)
+	{
 		APP_LOG("Create conn failed for %s (%d): %s\n",
-			addr_str, err, strerror(-err));
+				addr_str, err, strerror(-err));
 		return;
 	}
 
-	if (k_sem_take(&sem_connected, K_SECONDS(10)) != 0) {
+	if (k_sem_take(&sem_connected, K_SECONDS(10)) != 0)
+	{
 		APP_LOG("Connect confirmation timeout for %s\n", addr_str);
-		if (new_conn) {
+		if (new_conn)
+		{
 			bt_conn_disconnect(new_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 			k_sem_take(&sem_disconnected, K_SECONDS(3));
 		}
 		return;
 	}
 
-	if (new_conn == NULL) {
+	if (new_conn == NULL)
+	{
 		APP_LOG("Connection to %s failed (handled in connected_cb)\n", addr_str);
 		return;
 	}
 
 	APP_LOG("Connect succeeded for %s, handed off to write_disconnect\n", addr_str);
-	if (k_sem_take(&sem_disconnected, K_SECONDS(30)) != 0) {
+	if (k_sem_take(&sem_disconnected, K_SECONDS(30)) != 0)
+	{
 		APP_LOG("Disconnect confirmation timeout for %s — proceeding anyway\n",
-			addr_str);
+				addr_str);
 	}
 }
 
-void gatt_thread(void *p1, void *p2, void *p3){
+void gatt_thread(void *p1, void *p2, void *p3)
+{
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
@@ -1864,9 +1971,11 @@ void gatt_thread(void *p1, void *p2, void *p3){
 	APP_LOG("GATT THREAD STARTED, Will Wait till Scanning Thread fills the Queqe \n");
 	struct scan_result_t item;
 	char addr_str[BT_ADDR_LE_STR_LEN];
-	while(1){
+	while (1)
+	{
 		int ret = k_msgq_get(&scan_result_msgq, &item, K_FOREVER);
-		if (ret == 0) {
+		if (ret == 0)
+		{
 			bt_addr_le_to_str(&item.addr, addr_str, sizeof(addr_str));
 			APP_LOG("Consumed: %s  RSSI: %d  (queue remaining: %d)\n",
 					addr_str, item.rssi,
@@ -1876,8 +1985,9 @@ void gatt_thread(void *p1, void *p2, void *p3){
 
 			atomic_set(&conn_activity, 0);
 			k_sem_give(&radio_free_sem);
-			
-			if (k_msgq_num_used_get(&scan_result_msgq) == 0) {
+
+			if (k_msgq_num_used_get(&scan_result_msgq) == 0)
+			{
 				k_sem_give(&scan_restart_sem);
 			}
 		}
@@ -1891,11 +2001,13 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 	APP_LOG("wdisc worker %d: started for %s\n", self->id, addr_str);
 
 	k_sem_reset(&self->sem_remote_info);
-	if (k_sem_take(&self->sem_remote_info, K_SECONDS(10)) != 0) {
+	if (k_sem_take(&self->sem_remote_info, K_SECONDS(10)) != 0)
+	{
 		APP_LOG("Remote info not available in time for %s, trying PAST anyway\n", addr_str);
 	}
 
-	if (!self->conn) {
+	if (!self->conn)
+	{
 		APP_LOG("No active connection for %s — aborting\n", addr_str);
 		return;
 	}
@@ -1904,33 +2016,39 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 	bool proceed = true;
 	int slot_idx = -1;
 
-	if (!wait_for_connected_state(self->conn, CONN_WAIT_TIMEOUT_MS)) {
+	if (!wait_for_connected_state(self->conn, CONN_WAIT_TIMEOUT_MS))
+	{
 		APP_LOG("Connection did not reach CONNECTED state in time\n");
 
 		int derr = bt_conn_disconnect(self->conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		if (derr) {
+		if (derr)
+		{
 			APP_LOG("Disconnect call failed for %s (err %d) — likely already down\n",
 					addr_str, derr);
 		}
 		bt_conn_unref(self->conn);
 		self->conn = NULL;
 
-		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
+		k_sem_give(&sem_disconnected); /* signal AFTER this thread is truly done */
 		return;
 	}
 
 	/* ---- STEP 1: PAST ---- */
 	err = bt_le_per_adv_set_info_transfer(pawr_adv, self->conn, 0);
-	if (err) {
+	if (err)
+	{
 		APP_LOG("PAST failed for %s (err %d)\n", addr_str, err);
 		/* not fatal — continue to discover anyway */
-	} else {
+	}
+	else
+	{
 		APP_LOG("PAST sent for %s\n", addr_str);
 	}
 
 	k_sem_give(&sem_disconnected);
 	/* ---- STEP 2: GATT DISCOVER ---- */
-	if (proceed) {
+	if (proceed)
+	{
 		memset(&self->discover_params, 0, sizeof(self->discover_params));
 		self->discover_params.uuid = &pawr_char_uuid.uuid;
 		self->discover_params.func = discover_func;
@@ -1942,35 +2060,50 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 		k_sem_reset(&self->sem_discovered);
 
 		err = bt_gatt_discover(self->conn, &self->discover_params);
-		if (err) {
+		if (err)
+		{
 			APP_LOG("Discovery start failed for %s (err %d)\n", addr_str, err);
 			proceed = false;
-		} else if (!conn_is_live(self->conn)) {
+		}
+		else if (!conn_is_live(self->conn))
+		{
 			APP_LOG("Discovery aborted for %s — connection dropped before wait\n", addr_str);
 			proceed = false;
-		} else if (k_sem_take(&self->sem_discovered, K_SECONDS(10)) != 0) {
+		}
+		else if (k_sem_take(&self->sem_discovered, K_SECONDS(10)) != 0)
+		{
 			APP_LOG("Discovery timed out for %s\n", addr_str);
 			proceed = false;
-		} else if (!conn_is_live(self->conn)) {                         // <-- ADD this second check
+		}
+		else if (!conn_is_live(self->conn))
+		{ // <-- ADD this second check
 			APP_LOG("Discovery aborted for %s — connection dropped during wait\n", addr_str);
 			proceed = false;
-		} else if (self->pawr_attr_handle == 0) {
+		}
+		else if (self->pawr_attr_handle == 0)
+		{
 			APP_LOG("Characteristic not found for %s\n", addr_str);
 			proceed = false;
-		} else {
+		}
+		else
+		{
 			APP_LOG("Discovery succeeded for %s, handle = %d\n", addr_str, self->pawr_attr_handle);
 		}
 	}
 
 	/* ---- STEP 3: ASSIGN SLOT + WRITE CONFIG ---- */
-	if (proceed) {
+	if (proceed)
+	{
 		uint8_t subevent = 0, response_slot = 0;
 		slot_idx = find_or_assign_slot(addr_str, &subevent, &response_slot);
 
-		if (slot_idx < 0) {
+		if (slot_idx < 0)
+		{
 			APP_LOG("No slot available for %s\n", addr_str);
 			proceed = false;
-		} else {
+		}
+		else
+		{
 			struct pawr_timing sync_config;
 			sync_config.subevent = subevent;
 			sync_config.response_slot = response_slot;
@@ -1985,15 +2118,20 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 			k_sem_reset(&self->sem_written);
 
 			err = bt_gatt_write(self->conn, &self->write_params);
-			if (err) {
+			if (err)
+			{
 				APP_LOG("Write start failed for %s (err %d)\n", addr_str, err);
 				clear_slot(slot_idx);
 				proceed = false;
-			} else if (k_sem_take(&self->sem_written, K_SECONDS(10)) != 0) {
+			}
+			else if (k_sem_take(&self->sem_written, K_SECONDS(10)) != 0)
+			{
 				APP_LOG("Write timed out for %s\n", addr_str);
 				clear_slot(slot_idx);
 				proceed = false;
-			} else {
+			}
+			else
+			{
 				synced_devices[slot_idx].last_sync_time = k_uptime_get();
 				synced_devices[slot_idx].last_response_time = 0;
 				APP_LOG("PAwR config written for %s (subevent %d, slot %d)\n",
@@ -2002,50 +2140,62 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 		}
 	}
 
-	if (proceed) {
+	if (proceed)
+	{
 		int64_t write_time = k_uptime_get();
 		int64_t sync_wait_timeout_ms = 6000;
 		bool got_response = false;
 
 		APP_LOG("Waiting for PAwR sync confirmation from %s...\n", addr_str);
 
-		while (k_uptime_get() - write_time < sync_wait_timeout_ms) {
-			if (synced_devices[slot_idx].last_response_time > write_time) {
+		while (k_uptime_get() - write_time < sync_wait_timeout_ms)
+		{
+			if (synced_devices[slot_idx].last_response_time > write_time)
+			{
 				got_response = true;
 				APP_LOG("PAwR sync confirmed for %s (took %lld ms)\n",
 						addr_str, k_uptime_get() - write_time);
 				break;
 			}
-			if (!conn_is_live(self->conn)) {
+			if (!conn_is_live(self->conn))
+			{
 				APP_LOG("PAwR sync wait aborted for %s — connection dropped\n", addr_str);
 				break;
 			}
 			k_sleep(K_MSEC(100));
 		}
-		if (!got_response) {
+		if (!got_response)
+		{
 			APP_LOG("WARNING: No PAwR response from %s within %lld ms — "
 					"sync may not be established\n",
 					addr_str, sync_wait_timeout_ms);
 		}
 	}
 
-/* ---- STEP 4: DISCONNECT — always runs, regardless of proceed state ---- */
-	if (conn_is_live(self->conn)) {
+	/* ---- STEP 4: DISCONNECT — always runs, regardless of proceed state ---- */
+	if (conn_is_live(self->conn))
+	{
 		err = bt_conn_disconnect(self->conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		if (err) {
+		if (err)
+		{
 			APP_LOG("Disconnect call failed for %s (err %d)\n", addr_str, err);
-		} else {
+		}
+		else
+		{
 			APP_LOG("Disconnect requested for %s\n", addr_str);
 			/* wait for the disconnect to actually complete before unref'ing,
-			* so the peer's conn slot is fully freed before the next
-			* connection attempt to this same address */
+			 * so the peer's conn slot is fully freed before the next
+			 * connection attempt to this same address */
 			int wait_ms = 0;
-			while (conn_is_live(self->conn) && wait_ms < 2000) {
+			while (conn_is_live(self->conn) && wait_ms < 2000)
+			{
 				k_sleep(K_MSEC(50));
 				wait_ms += 50;
 			}
 		}
-	} else {
+	}
+	else
+	{
 		APP_LOG("Conn for %s already down, skipping disconnect call\n", addr_str);
 	}
 
@@ -2067,7 +2217,8 @@ void wdisc_worker_thread(void *p1, void *p2, void *p3)
 
 	APP_LOG("wdisc worker %d ready\n", self->id);
 
-	while (1) {
+	while (1)
+	{
 		k_msgq_get(&wdisc_job_q, &job, K_FOREVER);
 		APP_LOG("Received data is : ");
 
@@ -2079,29 +2230,30 @@ void wdisc_worker_thread(void *p1, void *p2, void *p3)
 
 void wdisc_pool_init(int n)
 {
-    if (n > WDISC_POOL_MAX) n = WDISC_POOL_MAX;
+	if (n > WDISC_POOL_MAX)
+		n = WDISC_POOL_MAX;
 
-    for (int i = 0; i < n; i++) {
-        struct wdisc_worker *w = &wdisc_workers[i];
+	for (int i = 0; i < n; i++)
+	{
+		struct wdisc_worker *w = &wdisc_workers[i];
 
-        w->id = i;
-        w->conn = NULL;
-        w->pawr_attr_handle = 0;
-        k_sem_init(&w->sem_discovered,  0, 1);
-        k_sem_init(&w->sem_written,     0, 1);
-        k_sem_init(&w->sem_remote_info, 0, 1);
+		w->id = i;
+		w->conn = NULL;
+		w->pawr_attr_handle = 0;
+		k_sem_init(&w->sem_discovered, 0, 1);
+		k_sem_init(&w->sem_written, 0, 1);
+		k_sem_init(&w->sem_remote_info, 0, 1);
 
-        w->tid = k_thread_create(&w->thread, wdisc_stacks[i], WDISC_THREAD_STACK_SIZE,
-                                  wdisc_worker_thread, w, NULL, NULL,
-                                  WDISC_THREAD_PRIORITY, 0, K_NO_WAIT);
+		w->tid = k_thread_create(&w->thread, wdisc_stacks[i], WDISC_THREAD_STACK_SIZE,
+								 wdisc_worker_thread, w, NULL, NULL,
+								 WDISC_THREAD_PRIORITY, 0, K_NO_WAIT);
 
-        char name[16];
-        snprintf(name, sizeof(name), "wdisc%d", i);
-        k_thread_name_set(w->tid, name);
-    }
-    wdisc_pool_size = n;
+		char name[16];
+		snprintf(name, sizeof(name), "wdisc%d", i);
+		k_thread_name_set(w->tid, name);
+	}
+	wdisc_pool_size = n;
 }
-
 
 void main_thread(void *p1, void *p2, void *p3)
 {
@@ -2118,7 +2270,8 @@ void main_thread(void *p1, void *p2, void *p3)
 	}
 }
 
-int app_initilisation(void){
+int app_initilisation(void)
+{
 	int err;
 	uint8_t flag = 0;
 
@@ -2126,12 +2279,21 @@ int app_initilisation(void){
 
 	init_bufs();
 	err = nvs_init_app();
-	if (err) { APP_LOG("NVS initialization failed (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("NVS initialization failed (err %d)\n", err);
+		return 0;
+	}
 
-	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart20));
-	if (!device_is_ready(uart_dev)) { APP_LOG("UART device not ready!\n"); return 0; }
+	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart30));
+	if (!device_is_ready(uart_dev))
+	{
+		APP_LOG("UART device not ready!\n");
+		return 0;
+	}
 
-	for (int i = 0; i < MAX_SYNCS; i++) {
+	for (int i = 0; i < MAX_SYNCS; i++)
+	{
 		memset(&synced_devices[i], 0, sizeof(synced_devices[i]));
 		synced_devices[i].subevent = INVALID_SLOT;
 		synced_devices[i].response_slot = INVALID_SLOT;
@@ -2139,11 +2301,14 @@ int app_initilisation(void){
 	}
 
 	ssize_t len = nvs_read(&fs, NVS_ID_MCUMGR_MODE, &flag, sizeof(flag));
-	if (len > 0 && flag == 1) {
+	if (len > 0 && flag == 1)
+	{
 		printk("MCUmgr boot\n");
 		flag = 0;
 		nvs_write(&fs, NVS_ID_MCUMGR_MODE, &flag, sizeof(flag));
-	} else {
+	}
+	else
+	{
 		console_getline_init();
 	}
 
@@ -2152,34 +2317,57 @@ int app_initilisation(void){
 	APP_LOG("Starting Periodic Advertising Demo\n");
 
 	err = bt_enable(NULL);
-	if (err) { APP_LOG("Bluetooth init failed (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Bluetooth init failed (err %d)\n", err);
+		return 0;
+	}
 
 	err = bt_le_ext_adv_create(BT_LE_EXT_ADV_NCONN, &adv_cb, &pawr_adv);
-	if (err) { APP_LOG("Failed to create advertising set (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Failed to create advertising set (err %d)\n", err);
+		return 0;
+	}
 
 	err = bt_le_per_adv_set_param(pawr_adv, &per_adv_params);
-	if (err) { APP_LOG("Failed to set periodic advertising parameters (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Failed to set periodic advertising parameters (err %d)\n", err);
+		return 0;
+	}
 
 	APP_LOG("Start Periodic Advertising\n");
 	err = bt_le_per_adv_start(pawr_adv);
-	if (err) { APP_LOG("Failed to enable periodic advertising (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Failed to enable periodic advertising (err %d)\n", err);
+		return 0;
+	}
 
 	APP_LOG("Start Extended Advertising\n");
 	err = bt_le_ext_adv_start(pawr_adv, BT_LE_EXT_ADV_START_DEFAULT);
-	if (err) { APP_LOG("Failed to start extended advertising (err %d)\n", err); return 0; }
+	if (err)
+	{
+		APP_LOG("Failed to start extended advertising (err %d)\n", err);
+		return 0;
+	}
 
 	wdisc_pool_init(WDISC_POOL_SIZE);
-	k_mutex_init(&radio_mutex);	
+	k_mutex_init(&radio_mutex);
 
 	return 1;
 }
 
 int main(void)
 {
-	if(app_initilisation()){
-		APP_LOG("Application Initialised Successfully \n \n");		
-	}else{
-		APP_LOG("Application Initialised Failed \n \n");		
+	if (app_initilisation())
+	{
+		APP_LOG("Application Initialised Successfully \n \n");
+	}
+	else
+	{
+		APP_LOG("Application Initialised Failed \n \n");
 	}
 
 	k_thread_create(&scan_thread_data, scan_thread_stack, SCAN_THREAD_STACK_SIZE,
@@ -2198,9 +2386,11 @@ int main(void)
 					main_thread, NULL, NULL, NULL,
 					MAIN_THREAD_PRIORITY, 0, K_NO_WAIT);
 
-	while(1){
+	while (1)
+	{
 		static int status_counter = 0;
-		if (++status_counter >= 12) {
+		if (++status_counter >= 12)
+		{
 			status_counter = 0;
 			APP_LOG("System status: %d synced devices active, waiting for commands...\n", num_synced);
 			APP_LOG("Current command: %s | temp_active: %s\n", current_command,
@@ -2217,8 +2407,10 @@ int main(void)
 	APP_LOG("Example: 1234  (sends [+]join,1234 for a few seconds)\n");
 
 	APP_LOG("\n=== Synced Devices Status ===\n");
-	for (int i = 0; i < MAX_SYNCS; i++) {
-		if (synced_devices[i].active) {
+	for (int i = 0; i < MAX_SYNCS; i++)
+	{
+		if (synced_devices[i].active)
+		{
 			APP_LOG("Device %d: subevent %d, response_slot %d, addr %s\n",
 					i, synced_devices[i].subevent,
 					synced_devices[i].response_slot, synced_devices[i].address);

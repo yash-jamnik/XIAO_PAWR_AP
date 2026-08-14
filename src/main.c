@@ -21,7 +21,7 @@
 #include <zephyr/sys/util.h>
 
 /* Variable Declaration for Scanning Usage */
-#define DEVICE_NAME "PARALLEL"   //"TEST_SAMPLE"  // "PAwR sync sample"    "Internal_testing"
+#define DEVICE_NAME "PARALLEL1"// "PAwR sync sample"   //"TEST_SAMPLE"  //     "Internal_testing"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS     20
@@ -903,6 +903,83 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 			APP_LOG("[TEL_ALL] ERROR: protobuf encoding failed\n");
 		}
 	}
+	else if (strncmp(cmd, "[+]list", 7) == 0 || strncmp(cmd, "list", 4) == 0)
+	{
+#define LIST_MAX_RANGE 20 /* serial protection: cap devices per request */
+
+		/* Parse: "list" | "list,<start>" | "list,<start>,<end>" */
+		int start_index = -1;
+		int end_index = -1;
+
+		const char *comma = strchr(cmd, ',');
+		if (comma)
+		{
+			start_index = atoi(comma + 1);
+
+			const char *comma2 = strchr(comma + 1, ',');
+			if (comma2)
+			{
+				end_index = atoi(comma2 + 1);
+			}
+			else
+			{
+				end_index = start_index; /* single index -> just that one */
+			}
+		}
+
+		/* Collect active slots so indices are contiguous 0..total-1
+		 * (slot numbers in the table can have gaps) */
+		int active_idx[MAX_SYNCS];
+		int total = 0;
+		for (int i = 0; i < MAX_SYNCS; i++)
+		{
+			if (synced_devices[i].active)
+			{
+				active_idx[total++] = i;
+			}
+		}
+
+		/* Bare "list" -> header only */
+		if (start_index < 0)
+		{
+			APP_LOG("[+]list,%d\n", total);
+			APP_LOG("[+]listend\n");
+			return;
+		}
+
+		/* Validate range */
+		if (start_index >= total || end_index < start_index)
+		{
+			APP_LOG("[+]list,err,invalid range (%d devices, valid 0-%d)\n",
+					total, total > 0 ? total - 1 : 0);
+			APP_LOG("[+]listend\n");
+			return;
+		}
+
+		/* Clamp end to available devices and to max chunk size */
+		if (end_index >= total)
+		{
+			end_index = total - 1;
+		}
+		if (end_index - start_index + 1 > LIST_MAX_RANGE)
+		{
+			end_index = start_index + LIST_MAX_RANGE - 1;
+		}
+
+		APP_LOG("[+]list,%d,%d,%d\n", total, start_index, end_index);
+
+		for (int n = start_index; n <= end_index; n++)
+		{
+			int i = active_idx[n];
+			APP_LOG("[+]dev,%d,%s,%d,%d\n",
+					n,
+					synced_devices[i].address,
+					synced_devices[i].subevent,
+					synced_devices[i].response_slot);
+		}
+
+		APP_LOG("[+]listend\n");
+	}
 	else if (strncmp(cmd, "[+]active,", 10) == 0)
 	{
 		const char *mac = cmd + 10;
@@ -1139,11 +1216,8 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 	for (size_t i = 0; i < to_send; i++)
 	{
-		uint8_t subevent =
-			(request->start + i) % per_adv_params.num_subevents;
-
+		uint8_t subevent = (request->start + i) % per_adv_params.num_subevents;
 		buf = &bufs[i];
-
 		memset(buf->data, 0, PACKET_SIZE);
 
 		if (proto_command_active && proto_len > 0)
@@ -1183,6 +1257,10 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		{
 			subevent_data_params[i].response_slot_count = NUM_RSP_SLOTS;
 		}
+		else if (response_window_active)
+		{
+		subevent_data_params[i].response_slot_count = NUM_RSP_SLOTS;
+		}
 		else
 		{
 			subevent_data_params[i].response_slot_count = 0;
@@ -1190,10 +1268,30 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		subevent_data_params[i].data = buf;
 	}
 
+	size_t total_bytes = 0;
+	for (size_t i = 0; i < to_send; i++)
+	{
+		total_bytes += subevent_data_params[i].data->len;
+	}
+	APP_LOG("[REQ_CB] to_send=%d total_payload_bytes=%d\n", to_send, (int)total_bytes);
+
 	err = bt_le_per_adv_set_subevent_data(adv, to_send, subevent_data_params);
 	if (err)
 	{
 		APP_LOG("Failed to set PAwR command data (err %d)\n", err);
+		APP_LOG("[REQ_CB] request->start=%d request->count=%d ARRAY_SIZE=%d -> to_send=%d\n",
+			request->start, request->count,
+			(int)ARRAY_SIZE(subevent_data_params), to_send);
+
+		for (size_t i = 0; i < to_send; i++)
+		{
+		APP_LOG("[REQ_CB] i=%d se=%d slot_start=%d slot_count=%d datalen=%d\n",
+			(int)i,
+			subevent_data_params[i].subevent,
+			subevent_data_params[i].response_slot_start,
+			subevent_data_params[i].response_slot_count,
+			subevent_data_params[i].data->len);
+		}
 		return;
 	}
 }
@@ -1209,23 +1307,24 @@ static void response_cb(struct bt_le_ext_adv *adv,
 
 	// {
 		/* Print data in the hex and the ascii */
-		char hex_str[3 * PACKET_SIZE + 1] = {0};
-		char ascii_str[PACKET_SIZE + 1] = {0};
-		size_t n = MIN(buf->len, PACKET_SIZE);
-		size_t pos = 0;
+	char hex_str[3 * PACKET_SIZE + 1] = {0};
+	char ascii_str[PACKET_SIZE + 1] = {0};
+	size_t n = MIN(buf->len, PACKET_SIZE);
+	size_t pos = 0;
 
-		for (size_t i = 0; i < n; i++)
-		{
-			pos += snprintf(&hex_str[pos], sizeof(hex_str) - pos,
-							 "%02X ", buf->data[i]);
-			uint8_t b = buf->data[i];
-			ascii_str[i] = (b >= 32 && b <= 126) ? (char)b : '.';
-		}
-		ascii_str[n] = '\0';
+	for (size_t i = 0; i < n; i++)
+	{
+		pos += snprintf(&hex_str[pos], sizeof(hex_str) - pos,
+							"%02X ", buf->data[i]);
+		uint8_t b = buf->data[i];
+		ascii_str[i] = (b >= 32 && b <= 126) ? (char)b : '.';
+	}
+	ascii_str[n] = '\0';
 
-		APP_LOG("[RESP] se=%d slot=%d raw[%d]: hex=[%s]\n",
-				info->subevent, info->response_slot, buf->len,
-				hex_str);
+	APP_LOG("[RESP] se=%d slot=%d raw[%d]: hex=[%s]\n",
+			info->subevent, info->response_slot, buf->len,
+			hex_str);
+	APP_LOG("%s\n", ascii_str);
 	// }
 
 	if(buf->len > 3){
@@ -1797,13 +1896,13 @@ void scan_thread(void *p1, void *p2, void *p3){
 			continue;
 		}
 
-		APP_LOG("%s : Scan window started (%ds max, 20 devices max) \n",tag_name, SCAN_WINDOW_SECONDS);
+		// APP_LOG("%s : Scan window started (%ds max, 20 devices max) \n",tag_name, SCAN_WINDOW_SECONDS);
 
 		/* Wait for either: 20 devices found, or 5s timeout */
 		k_sem_take(&scan_done_sem, K_SECONDS(SCAN_WINDOW_SECONDS));
 		scanning_enabled = false;
 		bt_le_scan_stop();
-		APP_LOG("%s :Scan window ended, %d device(s) collected\n", tag_name, scan_result_count);
+		// APP_LOG("%s :Scan window ended, %d device(s) collected\n", tag_name, scan_result_count);
 
 		if (scan_result_count > 0) {
 			flush_results_to_queue();

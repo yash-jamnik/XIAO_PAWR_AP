@@ -8,3 +8,4 @@ OtaCommand.ots_mac max_size:6
 TelResponse.mac   max_size:6  
 TelResponse.meta  max_size:64
 TelCommand.mac      max_size:6  
+CmdAck.mac      max_size:6

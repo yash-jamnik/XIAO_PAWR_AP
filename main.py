@@ -59,7 +59,7 @@ COMMANDS = {
     "CLEAR":  {"prefix": "[+]clear,",  "needs_target": False, "raw": False},
     "JOIN":   {"prefix": "[+]join,",   "needs_target": True,  "raw": False},
     "PING":   {"prefix": "[+]ping_all",   "needs_target": False, "raw": True},
-    "LIST":   {"prefix": "[+]list,0,19",   "needs_target": False, "raw": True},
+    "LIST":   {"prefix": "[+]list,0,20",   "needs_target": False, "raw": True},
 }
 
 DEFAULT_COMMAND = "LED"
@@ -69,11 +69,11 @@ LINE_ENDING = "\r\n"
 READ_TIMEOUT = 2.0
 DELAY_BETWEEN_COMMANDS = 5.0
 RESULT_PREFIX = "[+]res,"      # device lines starting with this are "wanted" results
-DEV_PREFIX = "[+]dev,"
+_PREFIX = "[+]dev,"
 
 # -------------------------------------------------------------------------------------
 TEL_RESPONSE_TIMEOUT = 12.0   # near the other config constants at the top
-
+ACK_WAIT_TIMEOUT = 10.0          # <-- ADD here
 
 class SerialWorker(QThread):
     """Owns the serial port and processes TIN batches in the background."""
@@ -91,7 +91,12 @@ class SerialWorker(QThread):
         self._connect_params = None     # (port, baud) when a connect is requested
         self._disconnect_requested = False
         self._last_res_mac = None          # <-- ADD: MAC from the latest [+]res line
-
+        self._pending_echo = None          # <-- ADD: command we expect to see echoed back
+        self._seen_plus_lines = set()      # <-- ADD: dedup set for "[+]" result lines
+        self._pending_ack = None         # <-- goes here
+        self._ack_received = False       # <-- goes here
+        self._ack_prefix = False         # <-- also add this (needed for the TEL prefix-match fix)
+        self._current_tin = None          # <-- ADD: TIN associated with the in-flight command
     # ---------- called from the GUI thread ----------
     def request_connect(self, port, baud):
         self._connect_params = (port, baud)
@@ -124,19 +129,13 @@ class SerialWorker(QThread):
                 self._disconnect_requested = False
                 self._do_disconnect()
 
-            # Continuously read ANYTHING the device sends, at any time.
-            # This captures multi-line / delayed responses (e.g. [+]tel, parameters).
             self._read_incoming()
 
             if self._queue and self.ser and self.ser.is_open:
                 digits, prefix, target_mac, raw = self._queue.pop(0)
                 self._process_one(digits, prefix, target_mac, raw)
-                if self._queue and prefix != "[+]tel,":   # <-- TEL paces itself
-                    # keep reading incoming data during the inter-command delay
-                    end = time.time() + DELAY_BETWEEN_COMMANDS
-                    while time.time() < end:
-                        self._read_incoming()
-                        time.sleep(0.02)
+                # _send() now blocks until ack-or-timeout internally —
+                # no more DELAY_BETWEEN_COMMANDS sleep needed here
             else:
                 time.sleep(0.05)
 
@@ -187,7 +186,7 @@ class SerialWorker(QThread):
     def _process_one(self, digits, prefix, target_mac=None, raw=False):
         if raw:
             self.log.emit("INFO", f"Sending raw command (no TIN/MAC lookup)")
-            self._send(prefix)
+            self._send(prefix, tin=None)
             return
 
         if self.df is None:
@@ -197,40 +196,44 @@ class SerialWorker(QThread):
         result, error = self._find_mac(digits)
         if error:
             self.log.emit("ERROR", error)
+            self.result.emit(f"[+]failed,{digits},lookup_error:{error}")   # <-- ADD
             return
         tin, mac = result
-        # Built at runtime:  prefix + csv_mac  (+ "," + target_mac for JOIN)
         command = prefix + mac
         if target_mac:
             command += "," + target_mac
         self.log.emit("INFO", f"Matched TIN: {tin}  MAC: {mac}")
-        self._send(command)
+        self._send(command, tin=tin)
 
-    def _send(self, command):
+    def _send(self, command, tin=None):
         try:
             self.log.emit("SENT", command)
+            self._pending_echo = command
+            self._pending_ack = command
+            self._ack_received = False
+            self._current_tin = tin
             self.ser.write((command + LINE_ENDING).encode("utf-8"))
             self.ser.flush()
 
-            # Give the device a moment, then collect the immediate response.
-            # Any further/delayed lines are picked up by the continuous reader
-            # in the run() loop, so nothing is ever missed.
-            deadline = time.time() + READ_TIMEOUT
-            got_response = False
+            deadline = time.time() + ACK_WAIT_TIMEOUT
             while time.time() < deadline:
-                if self._read_incoming():
-                    got_response = True
-                    deadline = time.time() + 0.5  # extend a bit while data flows
+                self._read_incoming()
+                if self._ack_received:
+                    self.log.emit("INFO", f"Ack received for: {command}")
+                    break
                 time.sleep(0.02)
-            if not got_response:
-                self.log.emit("WARN", "(no response)")
+            else:
+                self.log.emit("WARN", f"(no ack within {ACK_WAIT_TIMEOUT}s) — moving on")
+                if tin:
+                    self.result.emit(f"[+]failed,{tin},{command}")
+
+            self._pending_ack = None
+            self._current_tin = None
         except serial.SerialException as e:
             self.log.emit("ERROR", f"Serial error: {e}")
             self._do_disconnect()
 
     def _read_incoming(self):
-        """Read and log all complete lines waiting in the serial buffer.
-        Returns True if anything was received."""
         if not (self.ser and self.ser.is_open):
             return False
         received = False
@@ -240,24 +243,44 @@ class SerialWorker(QThread):
                 if not line:
                     break
                 decoded = line.decode("utf-8", errors="replace").strip()
-                if decoded:
-                    received = True
-                    self.log.emit("RECV", decoded)
-                    # Bifurcate: wanted result lines also go to the Results panel
-                if decoded.startswith(RESULT_PREFIX) or decoded.startswith(DEV_PREFIX):
-                    self.result.emit(decoded)
-                    prefix_len = len(RESULT_PREFIX) if decoded.startswith(RESULT_PREFIX) else len(DEV_PREFIX)
-                    parts = decoded[prefix_len:].split(",")
-                    if parts:
-                        self._last_res_mac = parts[0].strip().upper()
+                if not decoded:
+                    continue
+
+                if self._pending_echo is not None and decoded == self._pending_echo:
+                    self._pending_echo = None
+                    continue
+
+                received = True
+                self.log.emit("RECV", decoded)
+
+                if decoded.startswith("[+]"):
+                    if decoded not in self._seen_plus_lines:
+                        self._seen_plus_lines.add(decoded)
+                        self.result.emit(decoded)
+
+                    if decoded.startswith(RESULT_PREFIX):
+                        parts = decoded[len(RESULT_PREFIX):].split(",")
+                        if parts:
+                            self._last_res_mac = parts[0].strip().upper()
+
+                    if self._pending_ack is not None and decoded.startswith(self._pending_ack):
+                        self._ack_received = True
+
         except (serial.SerialException, OSError) as e:
             self.log.emit("ERROR", f"Serial read error: {e}")
             self._do_disconnect()
         return received
 
+    def clear_results_memory(self):
+            """Called when the user clears the Results panel — forget everything
+            seen so far so old lines can't 'block' fresh duplicates later, and
+            so the clear is a true reset."""
+            self._seen_plus_lines.clear()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+
         self.setWindowTitle("Serial TIN Command Sender")
         self.resize(1000, 560)
 
@@ -266,7 +289,7 @@ class MainWindow(QMainWindow):
         self.results_filename = datetime.now().strftime("results_%Y%m%d_%H%M%S.txt")
         self.results_file = open(self.results_filename, "a", encoding="utf-8")
         self.df = None
-        self.seen_ping_tins = set()   # <-- add this
+        self._result_line_no = 0          # <-- ADD: running counter for result numbering
 
         self.worker = SerialWorker()
         self.worker.log.connect(self.append_log)
@@ -277,6 +300,20 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.append_log("INFO", "Initialising the code!!!")
         self.append_log("INFO", f"Logs are being saved to: {self.log_filename}")
+
+    def clear_results_panel(self):
+        """Clears the Results view AND permanently wipes the results file
+        + dedup memory + numbering, so cleared entries never come back."""
+        self.result_view.clear()
+        self._result_line_no = 0
+        self.worker.clear_results_memory()
+
+        # Truncate the results file on disk so it's gone for good
+        try:
+            self.results_file.close()
+        except Exception:
+            pass
+        self.results_file = open(self.results_filename, "w", encoding="utf-8")  # 'w' truncates
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -399,7 +436,7 @@ class MainWindow(QMainWindow):
         self.result_view.setMaximumBlockCount(5000)
         rv.addWidget(self.result_view)
         self.clear_res_btn = QPushButton("Clear")
-        self.clear_res_btn.clicked.connect(self.clear_results)
+        self.clear_res_btn.clicked.connect(self.clear_results_panel)
         rv.addWidget(self.clear_res_btn, alignment=Qt.AlignRight)
         splitter.addWidget(res_box)
 
@@ -544,52 +581,43 @@ class MainWindow(QMainWindow):
         self.log_file.flush()
 
     def append_result(self, raw_line):
-        """Parse a result line and show it in the Results panel.
+        """Any line starting with '[+]' is shown in the Results panel,
+        numbered sequentially. '[+]res,...' lines get pretty-parsed;
+        everything else is shown raw.
 
-        Expected formats:
+        Expected [+]res format:
             [+]res,<MAC>,<TIN>,<val1>,<fw_version>,<val2>,<rssi>
-            [+]dev,ping,<TIN>
-        e.g.:
-            [+]res,F9:6F:C7:AB:F8:91,EN0010000242,2868,0.0.1,1562,-35
         """
         timestamp = datetime.now().strftime("%H:%M:%S")
 
         if raw_line.startswith(RESULT_PREFIX):
             payload = raw_line[len(RESULT_PREFIX):]
-        elif raw_line.startswith(DEV_PREFIX):
-            payload = raw_line[len(DEV_PREFIX):]
+            parts = [p.strip() for p in payload.split(",")]
+            if len(parts) >= 6:
+                mac, tin, val1, fw, val2, rssi = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
+                body = (f"TIN: {tin} | MAC: {mac} | "
+                        f"val1: {val1} | FW: {fw} | val2: {val2} | RSSI: {rssi}")
+            else:
+                body = f"RAW: {raw_line}"
+        elif raw_line.startswith("[+]failed,"):
+            payload = raw_line[len("[+]failed,"):]
+            parts = payload.split(",", 1)
+            tin = parts[0] if parts else "?"
+            cmd = parts[1] if len(parts) > 1 else ""
+            body = f"FAILED — TIN: {tin}  (no ack for: {cmd})"
         else:
-            payload = raw_line  # fallback, shouldn't normally hit this
+            body = raw_line
 
-        parts = [p.strip() for p in payload.split(",")]
-
-        if len(parts) >= 2 and parts[0].lower() == "ping":
-            tin = parts[1]
-            if tin in self.seen_ping_tins:
-                return  # already shown — skip duplicate
-            self.seen_ping_tins.add(tin)
-            pretty = f"[{timestamp}] PING reply — TIN: {tin}"
-        elif len(parts) >= 6:
-            mac, tin, val1, fw, val2, rssi = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
-            pretty = (f"[{timestamp}] TIN: {tin} | MAC: {mac} | "
-                    f"val1: {val1} | FW: {fw} | val2: {val2} | RSSI: {rssi}")
-        else:
-            # Unexpected shape — still capture it raw so nothing is lost
-            pretty = f"[{timestamp}] RAW: {raw_line}"
+        self._result_line_no += 1
+        pretty = f"{self._result_line_no}. [{timestamp}] {body}"
 
         self.result_view.appendPlainText(pretty)
         self.result_view.moveCursor(QTextCursor.End)
 
-        # Mirror to terminal, clearly marked
         print(f"[RESULT] {pretty}", flush=True)
 
-        # Save to the results file: timestamp + raw line (easy to parse later)
         self.results_file.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {raw_line}\n")
         self.results_file.flush()
-
-    def clear_results(self):
-        self.result_view.clear()
-        self.seen_ping_tins.clear()
 
     def closeEvent(self, event):
         self.worker.stop()
@@ -598,6 +626,7 @@ class MainWindow(QMainWindow):
         self.log_file.close()
         self.results_file.close()
         event.accept()
+
 
 def main():
     app = QApplication(sys.argv)

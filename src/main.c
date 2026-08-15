@@ -289,8 +289,8 @@ static const struct bt_le_per_adv_param per_adv_params = {
 	.options = 0,
 	.num_subevents = NUM_SUBEVENTS,
 	.subevent_interval = 0xA0,
-	.response_slot_delay = 0x10,
-	.response_slot_spacing = 0x20,
+	.response_slot_delay = 0x30,
+	.response_slot_spacing = 0x50,
 	.num_response_slots = NUM_RSP_SLOTS,
 };
 
@@ -585,6 +585,48 @@ static bool decode_tel_response(const uint8_t *data, size_t len,
 	return true;
 }
 
+static bool decode_cmd_ack(const uint8_t *data, size_t len,
+						   char *mac_out, size_t mac_out_size,
+						   uint32_t *status_out, CmdType *type_out)
+{
+	Command msg = Command_init_zero;
+	pb_istream_t stream = pb_istream_from_buffer(data, len);
+
+	if (!pb_decode(&stream, Command_fields, &msg))
+		return false;
+
+	if (msg.which_cmd != Command_cmd_ack_tag)
+		return false;
+
+	if (msg.cmd.cmd_ack.mac.size != 6)
+		return false;
+
+	format_mac_hex(msg.cmd.cmd_ack.mac.bytes, mac_out, mac_out_size);
+	*status_out = msg.cmd.cmd_ack.status;
+	*type_out = msg.cmd.cmd_ack.cmd_type;
+
+	return true;
+}
+
+static const char *cmd_type_name(CmdType t)
+{
+	switch (t)
+	{
+	case CmdType_CMD_LED:
+		return "led";
+	case CmdType_CMD_SPLASH:
+		return "splash";
+	case CmdType_CMD_CLEAR:
+		return "clear";
+	case CmdType_CMD_OTA:
+		return "ota";
+	case CmdType_CMD_JOIN:
+	    return "join";
+	default:	
+		return "cmd";
+	}
+}
+
 bool encode_command_with_mac(uint16_t which_cmd, uint8_t *mac, uint8_t *ots_mac, const char *label){
     Command cmd = Command_init_zero;
     cmd.request_id = 1;
@@ -657,7 +699,7 @@ bool encode_command_with_mac(uint16_t which_cmd, uint8_t *mac, uint8_t *ots_mac,
 // Function to parse and handle commands
 static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 {
-	APP_LOG("CMD: '%s'\n", cmd);
+	APP_LOG("[processing]: '%s'\n", cmd);
 
 	if (strncmp(cmd, "[+]join,", 8) == 0)
 	{
@@ -740,7 +782,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		response_window_active = true;
 		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
 		encode_command_with_mac(Command_led_tag, mac, NULL, "LED");
-		APP_LOG("[+]LED_PROTO_READY\n");
+		APP_LOG("[processing]: [+]LED_PROTO_READY\n");
 	}
 	else if (strncmp(cmd, "[+]splash,", 10) == 0)
 	{
@@ -766,7 +808,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		// encode_splash_command_with_mac(mac);
 		encode_command_with_mac(Command_default_image_tag, mac, NULL, "SPLASH");
 
-		APP_LOG("[+]SPLASH_PROTO_READY\n");
+		APP_LOG("[processing]: [+]SPLASH_PROTO_READY\n");
 	}
 	else if (strncmp(cmd, "[+]clear,", 9) == 0)
 	{
@@ -792,7 +834,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		//  THIS IS THE MAIN CHANGE
 		// encode_clear_command_with_mac(mac);
 		encode_command_with_mac(Command_clear_epd_tag, mac, NULL, "CLEAR");
-		APP_LOG("[+]CLEAR_PROTO_READY\n");
+		APP_LOG("[processing]: [+]CLEAR_PROTO_READY\n");
 	}
 	else if (strncmp(cmd, "[+]ota,", 7) == 0)
 	{
@@ -839,7 +881,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		// encode_ota_command_with_mac(esl_mac, ots_mac);
 		encode_command_with_mac(Command_ota_tag, esl_mac, ots_mac, "OTA");
 
-		APP_LOG("[+]OTA_PROTO_READY\n");
+		APP_LOG("[processing]: [+]OTA_PROTO_READY\n");
 	}
 	else if (strncmp(cmd, "[+]tel,", 7) == 0)
 	{
@@ -868,7 +910,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		active_command_mac[sizeof(active_command_mac) - 1] = '\0';
 		encode_command_with_mac(Command_tel_tag, mac, NULL, "TEL");
 
-		APP_LOG("[+]TEL_PROTO_READY\n");
+		APP_LOG("[processing]: [+]TEL_PROTO_READY\n");
 	}
 	else if (strcmp(cmd, "[+]ping_all") == 0 || strcmp(cmd, "ping_all") == 0)
 	{
@@ -896,11 +938,11 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		encode_command_with_mac(Command_tel_tag, bcast_mac, NULL, "PING ALL");
 
 		if (proto_command_active && proto_len > 0){
-			APP_LOG("[+]TEL_ALL_PROTO_READY len=%d\n", (int)proto_len);
+			APP_LOG("[processing]: [+]TEL_ALL_PROTO_READY len=%d\n", (int)proto_len);
 		}
 		else{
 			tel_all_active = false;
-			APP_LOG("[TEL_ALL] ERROR: protobuf encoding failed\n");
+			APP_LOG("[processing]: [TEL_ALL] ERROR: protobuf encoding failed\n");
 		}
 	}
 	else if (strncmp(cmd, "[+]list", 7) == 0 || strncmp(cmd, "list", 4) == 0)
@@ -978,7 +1020,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 					synced_devices[i].response_slot);
 		}
 
-		APP_LOG("[+]listend\n");
+		APP_LOG("[processing]:[+]listend\n");
 	}
 	else if (strncmp(cmd, "[+]active,", 10) == 0)
 	{
@@ -992,7 +1034,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		response_window_active = true;
 		response_window_expiry_ms = k_uptime_get() + RESPONSE_WINDOW_TIMEOUT_MS;
 
-		APP_LOG("[+]ACTIVE READY\n");
+		APP_LOG("[processing]: [+]ACTIVE READY\n");
 	}
 	else if (strcmp(cmd, "version") == 0 || strcmp(cmd, "ver") == 0)
 	{
@@ -1090,7 +1132,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		}
 	}
 
-	APP_LOG("CMD: '%s'\n", cmd);
+	APP_LOG("[processing]: '%s'\n", cmd);
 }
 
 void join_command(void *pawr_adv_ptr, void *unused1, void *unused2)
@@ -1104,7 +1146,7 @@ void join_command(void *pawr_adv_ptr, void *unused1, void *unused2)
 	APP_LOG("Quick commands:\n");
 	APP_LOG("  1234             - Send join command with parameter 1234 (burst)\n");
 	APP_LOG("  join,1234        - Send join command with parameter 1234 (burst)\n");
-	APP_LOG("  [+]tel,AA:BB:CC:DD:EE:FF - Send TEL command for one device\n");
+	APP_LOG("  sample : [+]tel,AA:BB:CC:DD:EE:FF - Send TEL command for one device\n");
 	APP_LOG("  test             - Reset to default join command [+]join,9999\n");
 	APP_LOG("  status           - Show synced devices and current command\n");
 	APP_LOG("  refresh          - Force send current command now\n");
@@ -1273,19 +1315,19 @@ static void request_cb(struct bt_le_ext_adv *adv,
 	{
 		total_bytes += subevent_data_params[i].data->len;
 	}
-	APP_LOG("[REQ_CB] to_send=%d total_payload_bytes=%d\n", to_send, (int)total_bytes);
+	// APP_LOG("[request_cb] to_send=%d total_payload_bytes=%d\n", to_send, (int)total_bytes);
 
 	err = bt_le_per_adv_set_subevent_data(adv, to_send, subevent_data_params);
 	if (err)
 	{
-		APP_LOG("Failed to set PAwR command data (err %d)\n", err);
-		APP_LOG("[REQ_CB] request->start=%d request->count=%d ARRAY_SIZE=%d -> to_send=%d\n",
+		APP_LOG("[request_cb] Failed to set PAwR command data (err %d)\n", err);
+		APP_LOG("[request_cb] request->start=%d request->count=%d ARRAY_SIZE=%d -> to_send=%d\n",
 			request->start, request->count,
 			(int)ARRAY_SIZE(subevent_data_params), to_send);
 
 		for (size_t i = 0; i < to_send; i++)
 		{
-		APP_LOG("[REQ_CB] i=%d se=%d slot_start=%d slot_count=%d datalen=%d\n",
+		APP_LOG("[request_cb] i=%d se=%d slot_start=%d slot_count=%d datalen=%d\n",
 			(int)i,
 			subevent_data_params[i].subevent,
 			subevent_data_params[i].response_slot_start,
@@ -1295,6 +1337,21 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		return;
 	}
 }
+
+/* Find synced_devices[] index by MAC string. Returns -1 if not found. */
+static int find_slot_by_mac(const char *mac_str)
+{
+	for (int i = 0; i < MAX_SYNCS; i++)
+	{
+		if (synced_devices[i].active &&
+			strcmp(synced_devices[i].address, mac_str) == 0)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
 
 static void response_cb(struct bt_le_ext_adv *adv,
 						struct bt_le_per_adv_response_info *info,
@@ -1321,175 +1378,55 @@ static void response_cb(struct bt_le_ext_adv *adv,
 	}
 	ascii_str[n] = '\0';
 
-	APP_LOG("[RESP] se=%d slot=%d raw[%d]: hex=[%s]\n",
-			info->subevent, info->response_slot, buf->len,
-			hex_str);
-	APP_LOG("%s\n", ascii_str);
-	// }
+	// APP_LOG("[responce_cb] se=%d slot=%d raw[%d]: hex=[%s]\n",
+	// 		info->subevent, info->response_slot, buf->len,
+	// 		hex_str);
 
-	if(buf->len > 3){
-			char tel_mac[24] = {0};
+	if (buf->len > 3)
+	{
+		char tel_mac[24] = {0};
 		char tel_meta[64] = {0};
-	if (decode_tel_response(buf->data,
-							buf->len,
-							tel_mac,
-							sizeof(tel_mac),
-							tel_meta,
-							sizeof(tel_meta))){
-		APP_LOG("decoded information is : mac=%s meta=%s\n", tel_mac, tel_meta);
-		}else{
-			APP_LOG("decoding failed, %s\n", ascii_str);
-		}	
+
+		char ack_mac[24] = {0};
+		uint32_t status = 0;
+		CmdType type = CmdType_CMD_UNKNOWN;
+
+		if (decode_cmd_ack(buf->data, buf->len,
+							ack_mac, sizeof(ack_mac),
+							&status, &type)){
+			APP_LOG("[+]%s,%s subevent : %d response : %d\n\n", cmd_type_name(type), ack_mac, info->subevent, info->response_slot);
+			int idx = find_slot_by_mac(ack_mac);
+			if (idx >= 0){
+				synced_devices[idx].last_response_time = k_uptime_get();
+			}
+		}else if (decode_tel_response(buf->data, buf->len,
+							tel_mac, sizeof(tel_mac),
+							tel_meta, sizeof(tel_meta))){
+			APP_LOG("[+]tel,%s,%s, subevent : %d response : %d\n", tel_mac, tel_meta, info->subevent, info->response_slot);
+			int idx = find_slot_by_mac(tel_mac);
+			if (idx >= 0){
+				synced_devices[idx].last_response_time = k_uptime_get();
+			}
+		}else
+		{
+			// APP_LOG("[responce_cb] decoding failed, %s\n", ascii_str);
+			/* Even though we couldn't decode payload, something answered in this
+			* slot — treat it as a liveness signal if the slot is assigned. */
+			for (int i = 0; i < MAX_SYNCS; i++)
+			{
+				if (synced_devices[i].active &&
+					synced_devices[i].subevent == info->subevent &&
+					synced_devices[i].response_slot == info->response_slot)
+				{
+					synced_devices[i].last_response_time = k_uptime_get();
+					break;
+				}
+			}
+			// if(buf->len > 20){
+			// 	APP_LOG("%s\n subevent : %d response : %d\n", ascii_str);
+			// }
+		}
 	}
-
-	// if (buf && buf->len > 0)
-	// {
-	// 	char tel_mac[24] = {0};
-	// 	char tel_meta[64] = {0};
-	// 	if (buf && buf->len > 3)
-	// 	{
-	// 		if (strncmp((char *)buf->data, "OK,", 3) == 0)
-	// 		{
-	// 			char mac[BT_ADDR_LE_STR_LEN] = {0};
-
-	// 			size_t copy_len = MIN(buf->len - 3, sizeof(mac) - 1);
-
-	// 			memcpy(mac, buf->data + 3,copy_len);
-	// 			mac[copy_len] = '\0';
-
-	// 			printk("RX MAC='%s'\n", mac);
-
-	// 			for (int i = 0; i < MAX_SYNCS; i++)
-	// 			{
-	// 				if (!synced_devices[i].active)
-	// 					continue;
-
-	// 				if (strncmp(mac, synced_devices[i].address, 17) == 0)
-	// 				{
-	// 					printk("MATCH FOUND!\n");
-
-	// 					synced_devices[i].last_response_time = k_uptime_get();
-	// 					synced_devices[i].state = PAWR_DEVICE_SYNCED;
-	// 					synced_devices[i].active_check_pending = false;
-	// 					synced_devices[i].active_check_retry = 0;
-
-	// 					APP_LOG("Recovered device %s\n", mac);
-	// 					return;
-	// 				}
-	// 			}
-
-	// 			printk("NO MATCH FOUND\n");
-	// 		}
-	// 	}
-	// 	if (decode_tel_response(buf->data,
-	// 							buf->len,
-	// 							tel_mac,
-	// 							sizeof(tel_mac),
-	// 							tel_meta,
-	// 							sizeof(tel_meta)))
-	// 	{
-	// 		char tin[20] = {0};
-	// 		char batt[20] = {0};
-	// 		char *comma = strchr(tel_meta, ',');
-
-	// 		if (comma)
-	// 		{
-	// 			size_t tin_len = (size_t)(comma - tel_meta);
-	// 			if (tin_len >= sizeof(tin))
-	// 			{
-	// 				tin_len = sizeof(tin) - 1;
-	// 			}
-
-	// 			memcpy(tin, tel_meta, tin_len);
-	// 			tin[tin_len] = '\0';
-
-	// 			strncpy(batt, comma + 1, sizeof(batt) - 1);
-	// 			batt[sizeof(batt) - 1] = '\0';
-
-	// 			APP_LOG("[+]res,%s,%s,%s\n", tel_mac, tin, batt);
-	// 		}
-	// 		else
-	// 		{
-	// 			APP_LOG("[+]res,%s,%s\n", tel_mac, tel_meta);
-	// 		}
-
-	// 		return;
-	// 	}
-
-	// 	// Update slot by subevent/response_slot
-	// 	int idx = -1;
-	// 	for (int i = 0; i < MAX_SYNCS; i++)
-	// 	{
-	// 		if (synced_devices[i].active &&
-	// 			synced_devices[i].subevent == info->subevent &&
-	// 			synced_devices[i].response_slot == info->response_slot)
-	// 		{
-	// 			idx = i;
-	// 			synced_devices[i].last_response_time = k_uptime_get();
-
-	// 			// Only print debug for the device we sent a command to
-	// 			if (active_command_mac[0] != '\0' &&
-	// 				strcmp(synced_devices[idx].address, active_command_mac) == 0)
-	// 			{
-	// 				char dbg_mac[24] = {0};
-	// 				char dbg_meta[64] = {0};
-
-	// 				// try without offset first, then with +1
-	// 				bool decoded = decode_tel_response(buf->data, buf->len,
-	// 												dbg_mac, sizeof(dbg_mac),
-	// 												dbg_meta, sizeof(dbg_meta));
-	// 				if (!decoded && buf->len > 1)
-	// 				{
-	// 					decoded = decode_tel_response(buf->data + 1, buf->len - 1,
-	// 												dbg_mac, sizeof(dbg_mac),
-	// 												dbg_meta, sizeof(dbg_meta));
-	// 				}
-
-	// 				if (decoded)
-	// 				{
-	// 					char dbg_tin[20] = {0};
-	// 					char dbg_batt[20] = {0};
-	// 					char *comma = strchr(dbg_meta, ',');
-	// 					if (comma)
-	// 					{
-	// 						size_t tin_len = (size_t)(comma - dbg_meta);
-	// 						if (tin_len >= sizeof(dbg_tin))
-	// 							tin_len = sizeof(dbg_tin) - 1;
-	// 						memcpy(dbg_tin, dbg_meta, tin_len);
-	// 						dbg_tin[tin_len] = '\0';
-	// 						strncpy(dbg_batt, comma + 1, sizeof(dbg_batt) - 1);
-	// 						APP_LOG("[+]DEBUG MAC=%s TIN=%s BATT=%s\n", dbg_mac, dbg_tin, dbg_batt);
-	// 					}
-	// 					else
-	// 					{
-	// 						APP_LOG("[+]DEBUG MAC=%s META=%s\n", dbg_mac, dbg_meta);
-	// 					}
-	// 				}
-	// 				else
-	// 				{
-	// 					// decode failed - print raw as text skipping non-printable
-	// 					char text_buf[64] = {0};
-	// 					int ti = 0;
-	// 					for (size_t j = 0; j < buf->len && ti < 63; j++)
-	// 					{
-	// 						char c = buf->data[j];
-	// 						if (c >= 0x20 && c <= 0x7E)
-	// 							text_buf[ti++] = c;
-	// 					}
-	// 					text_buf[ti] = '\0';
-	// 					APP_LOG("[+]DEBUG RAW=%s\n", text_buf);
-	// 					APP_LOG("[+]DEBUG HINT: protobuf mismatch - fix command.options and regenerate\n");
-	// 				}
-	// 			}
-	// 			break;
-	// 		}
-	// 	}
-	// }
-	// else
-	// {
-	// 	APP_LOG("Empty response from subevent %d, slot %d\n",
-	// 			info->subevent, info->response_slot);
-	// }
 }
 
 static const struct bt_le_ext_adv_cb adv_cb = {
@@ -1512,7 +1449,7 @@ int64_t endTime = 0;
 void connected_cb(struct bt_conn *conn, uint8_t err)
 {
 	if (err) { 
-		APP_LOG("Connection failed (err 0x%02X), elapsed %lld ms\n",
+		APP_LOG("[connected_cb] Connection failed (err 0x%02X), elapsed %lld ms\n",
 				err, endTime - startTime);
 
 		bt_conn_unref(conn);
@@ -1529,10 +1466,10 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 
     char addr_str[BT_ADDR_LE_STR_LEN];
     bt_addr_le_to_str(&job.addr, addr_str, sizeof(addr_str));
-    APP_LOG("Connected CB: connection established for %s\n", addr_str);
+    APP_LOG("[connected_cb] connection established for %s\n", addr_str);
 
     if (k_msgq_put(&wdisc_job_q, &job, K_NO_WAIT) != 0) {
-        APP_LOG("wdisc queue full, dropping connection %s\n", addr_str);
+        APP_LOG("[connected_cb] wdisc queue full, dropping connection %s\n", addr_str);
         bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
         bt_conn_unref(conn);
         conn = NULL;
@@ -1550,7 +1487,7 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 	    reason == BT_HCI_ERR_LOCALHOST_TERM_CONN) {
 			/* graceful, expected */
 	} else if (reason == BT_HCI_ERR_CONN_TIMEOUT) {
-		APP_LOG("Supervision timeout for this device — link dropped abnormally\n");
+		APP_LOG("[disconnected_cb] Supervision timeout for this device — link dropped abnormally\n");
 		/* consider: mark this MAC for a longer backoff/cooldown before
 		 * scan_thread re-attempts a connect, since the controller may
 		 * need time to release resources internally */
@@ -1563,7 +1500,7 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
         bt_addr_le_to_str(dev_addr, addr_str, sizeof(addr_str));
     }
 
-	APP_LOG("Disconnected CB : %s, reason 0x%02X %s\n\n",
+	APP_LOG("[disconnected_cb] : %s, reason 0x%02X %s\n\n",
             dev_addr ? addr_str : "(unknown)", reason, bt_hci_err_to_str(reason));
 
 	if (conn && dev_addr)
@@ -1579,7 +1516,7 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 				if (synced_devices[i].active &&
 					strcmp(synced_devices[i].address, addr_str) == 0)
 				{
-					APP_LOG("Device %s disconnected, keeping slot %d (subevent %d, slot %d)\n",
+					APP_LOG("[disconnected_cb] Device %s disconnected, keeping slot %d (subevent %d, slot %d)\n",
 							addr_str,
 							i,
 							synced_devices[i].subevent,
@@ -1639,7 +1576,7 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 
 		char addr_str[BT_ADDR_LE_STR_LEN];
 		bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
-		APP_LOG("Matched device %d/%d: %s rssi %d\n",
+		APP_LOG("[device_found] Matched device %d/%d: %s rssi %d\n",
 				scan_result_count, MAX_SCAN_RESULTS, addr_str, rssi);
 
 		if (scan_result_count >= MAX_SCAN_RESULTS) {
@@ -1659,11 +1596,11 @@ static void flush_results_to_queue(void)
 	for (int i = 0; i < scan_result_count; i++) {
 		int ret = k_msgq_put(&scan_result_msgq, &scan_results[i], K_NO_WAIT);
 		if (ret != 0) {
-			APP_LOG("msgq full, dropping result %d (err %d)\n", i, ret);
+			APP_LOG("[flush_result] msgq full, dropping result %d (err %d)\n", i, ret);
 		}
 	}
 
-	APP_LOG("Flushed %d results to queue\n", scan_result_count);
+	APP_LOG("[flush_result] Flushed %d results to queue\n", scan_result_count);
 	scan_result_count = 0;
 
 	k_mutex_unlock(&results_mutex);

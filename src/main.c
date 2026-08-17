@@ -1422,9 +1422,9 @@ static void response_cb(struct bt_le_ext_adv *adv,
 					break;
 				}
 			}
-			// if(buf->len > 20){
-			// 	APP_LOG("%s\n subevent : %d response : %d\n", ascii_str);
-			// }
+			if(buf->len > 20){
+				APP_LOG("%s subevent : %d response : %d\n", ascii_str, info->subevent, info->response_slot);
+			}
 		}
 	}
 }

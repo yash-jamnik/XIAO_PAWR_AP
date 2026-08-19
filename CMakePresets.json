@@ -1,0 +1,23 @@
+{
+    "version": 2,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20
+    },
+    "configurePresets": [
+        {
+            "name": "build",
+            "displayName": "Build for nRF54l15 DK nRF54l15 Application",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "BOARD": "nrf54l15dk/nrf54l15/cpuapp",
+                "EXTRA_DTC_OVERLAY_FILE": "boards/Ble_gateway_DK_board.overlay",
+                "DEBUG_THREAD_INFO": true,
+                "CONFIG_DEBUG_THREAD_INFO": true,
+                "XIAO_PAWR_AP_DEBUG_THREAD_INFO": true,
+                "mcuboot_DEBUG_THREAD_INFO": false
+            }
+        }
+    ]
+}

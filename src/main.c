@@ -21,7 +21,7 @@
 #include <zephyr/sys/util.h>
 
 /* Variable Declaration for Scanning Usage */
-#define DEVICE_NAME "PARALLEL1"// "PAwR sync sample"   //"TEST_SAMPLE"  //     "Internal_testing"
+#define DEVICE_NAME "THINGSX_ESL"		 	//"PARALLEL1"// "PAwR sync sample"   //"TEST_SAMPLE"  // "Internal_testing"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS     20
@@ -332,21 +332,29 @@ enum pawr_device_state
 	PAWR_DEVICE_VERIFYING,
 };
 
-// Structure to store synced device information
+
+/* 
+	Structure to store synced device information
+	use it in decremental order so less ram will be utilised.
+*/
 struct synced_device
 {
-	bool active;							// whether you recieved any responce or not. //after timeout it will be inactive
-	enum pawr_device_state state;			// disconnected, synced , verifying
-	uint8_t subevent;						// subevent is what we are assigning
-	uint8_t response_slot;					// response is what we are assining
-
-	char address[ADDR_STR_LEN]; 			// BT addr as string (from onboarding)
 	int64_t last_update_time;			
 	int64_t last_response_time;
 	int64_t last_sync_time;
-	bool active_check_pending;
-	uint8_t active_check_retry;
 	int64_t active_check_time;
+
+	/* 4-Byte Aligned (enum) */
+	enum pawr_device_state state;			// disconnected, synced , verifying
+
+	/* 1-Byte Aligned */
+	char address[ADDR_STR_LEN]; 			// BT addr as string (from onboarding)
+	uint8_t subevent;						// subevent is what we are assigning
+	uint8_t response_slot;					// response is what we are assining
+	uint8_t active_check_retry;
+
+	bool active;							// whether you recieved any responce or not. //after timeout it will be inactive
+	bool active_check_pending;
 	bool tel_reported;
 };
 
@@ -1394,7 +1402,7 @@ static void response_cb(struct bt_le_ext_adv *adv,
 		if (decode_cmd_ack(buf->data, buf->len,
 							ack_mac, sizeof(ack_mac),
 							&status, &type)){
-			APP_LOG("[+]%s,%s subevent : %d response : %d\n\n", cmd_type_name(type), ack_mac, info->subevent, info->response_slot);
+			APP_LOG("[+]res,[+]%s,%s event:%d slot:%d\n", cmd_type_name(type), ack_mac, info->subevent, info->response_slot);
 			int idx = find_slot_by_mac(ack_mac);
 			if (idx >= 0){
 				synced_devices[idx].last_response_time = k_uptime_get();
@@ -1402,7 +1410,7 @@ static void response_cb(struct bt_le_ext_adv *adv,
 		}else if (decode_tel_response(buf->data, buf->len,
 							tel_mac, sizeof(tel_mac),
 							tel_meta, sizeof(tel_meta))){
-			APP_LOG("[+]tel,%s,%s, subevent : %d response : %d\n", tel_mac, tel_meta, info->subevent, info->response_slot);
+			APP_LOG("[+]res,[+]tel,%s,%s, event:%d slot:%d\n", tel_mac, tel_meta, info->subevent, info->response_slot);
 			int idx = find_slot_by_mac(tel_mac);
 			if (idx >= 0){
 				synced_devices[idx].last_response_time = k_uptime_get();
@@ -1416,14 +1424,14 @@ static void response_cb(struct bt_le_ext_adv *adv,
 			{
 				if (synced_devices[i].active &&
 					synced_devices[i].subevent == info->subevent &&
-					synced_devices[i].response_slot == info->response_slot)
+					synced_devices[i].	response_slot == info->response_slot)
 				{
 					synced_devices[i].last_response_time = k_uptime_get();
 					break;
 				}
 			}
 			if(buf->len > 20){
-				APP_LOG("%s subevent : %d response : %d\n", ascii_str, info->subevent, info->response_slot);
+				APP_LOG("%s subevent:%d response: %d\n", ascii_str, info->subevent, info->response_slot);
 			}
 		}
 	}
@@ -2164,9 +2172,10 @@ int app_initilisation(void){
 	err = nvs_init_app();
 	if (err) { APP_LOG("NVS initialization failed (err %d)\n", err); return 0; }
 
-	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart20));
+	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart30));
 	if (!device_is_ready(uart_dev)) { APP_LOG("UART device not ready!\n"); return 0; }
 
+	/*  In the beginning  mark everything as a invalid  */
 	for (int i = 0; i < MAX_SYNCS; i++) {
 		memset(&synced_devices[i], 0, sizeof(synced_devices[i]));
 		synced_devices[i].subevent = INVALID_SLOT;
@@ -2246,6 +2255,7 @@ int main(void)
 		k_sleep(K_SECONDS(5));
 	}
 
+	/* ---- Functions are never going to run ---- */
 	/* ---- rest of function unchanged ---- */
 	APP_LOG("Maximum number of syncs onboarded: %d devices\n", num_synced);
 	APP_LOG("System ready - listening for commands via UART\n");

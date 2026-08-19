@@ -1,4 +1,2 @@
-
-
-#include "../boards/Ble_gateway_DK_board.overlay"
-// #include "../boards/new.overlay"
+// #include "../boards/Ble_gateway_DK_board.overlay"
+#include "../boards/new.overlay"

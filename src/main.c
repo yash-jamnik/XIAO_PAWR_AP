@@ -22,6 +22,8 @@
 
 /* Variable Declaration for Scanning Usage */
 #define DEVICE_NAME "THINGSX_ESL"		 	//"PARALLEL1"// "PAwR sync sample"   //"TEST_SAMPLE"  // "Internal_testing"
+// #define DEVICE_NAME "PAwR sync sample"
+// #define DEVICE_NAME "PAWR_SYNC_SAMPLE"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS     20
@@ -2171,6 +2173,10 @@ int app_initilisation(void){
 	init_bufs();
 	err = nvs_init_app();
 	if (err) { APP_LOG("NVS initialization failed (err %d)\n", err); return 0; }
+
+	/* 	UART20 - for Development Board 
+		UART30 - for Gateway Board.
+	*/
 
 	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart30));
 	if (!device_is_ready(uart_dev)) { APP_LOG("UART device not ready!\n"); return 0; }

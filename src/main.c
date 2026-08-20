@@ -265,8 +265,8 @@ static K_SEM_DEFINE(radio_free_sem, 0, 1);
 
 static int64_t last_onboard_time = 0;
 
-#define NUM_RSP_SLOTS 10
-#define NUM_SUBEVENTS 15
+#define NUM_RSP_SLOTS 250
+#define NUM_SUBEVENTS 1
 #define PACKET_SIZE 30
 #define NAME_LEN 30
 #define UART_BUF_SIZE 256
@@ -285,14 +285,28 @@ static struct bt_uuid_128 pawr_char_uuid =
 	BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef1));
 // static uint16_t pawr_attr_handle;
 
-static const struct bt_le_per_adv_param per_adv_params = {
+/*
+subevent = 1;
+slots = 250
+
 	.interval_min = 0xC00,
 	.interval_max = 0xC00,
 	.options = 0,
 	.num_subevents = NUM_SUBEVENTS,
 	.subevent_interval = 0xA0,
-	.response_slot_delay = 0x30,
-	.response_slot_spacing = 0x50,
+   	.response_slot_delay=0x30;
+	.response_slot_spacing = 40; //0x50,
+	.num_response_slots = NUM_RSP_SLOTS,
+
+*/
+static const struct bt_le_per_adv_param per_adv_params = {
+	.interval_min = 0x140,
+	.interval_max = 0x140,
+	.options = 0,
+	.num_subevents = NUM_SUBEVENTS,
+	.subevent_interval = 0xF0,
+	.response_slot_delay = 0x10,
+	.response_slot_spacing = 0x08, //0x50, 5ms
 	.num_response_slots = NUM_RSP_SLOTS,
 };
 

@@ -6,4 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "nanopb>=0.4.9.1",
+    "pandas>=3.0.5",
+    "paramiko>=5.0.0",
+    "pyqt5==5.15.9",
+    "pyqt5-qt5==5.15.2",
+    "pyserial>=3.5",
+    "requests>=2.34.2",
 ]

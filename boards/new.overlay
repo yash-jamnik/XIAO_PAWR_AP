@@ -10,7 +10,7 @@
 
 &uart30 {
 	status = "okay";
-	current-speed = <460800>;
+	current-speed = <460800>;//<1000000>; // <115200>; //
 };
 
 &uart30_default {

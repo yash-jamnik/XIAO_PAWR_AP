@@ -48,7 +48,7 @@ except ImportError:
 
 # ---------------- CONFIG (defaults shown in the GUI, editable there) ----------------
 DEFAULT_PORT = "COM18"
-DEFAULT_BAUD = "115200"
+DEFAULT_BAUD = "1000000" #"460800" #"115200"
 DEFAULT_CSV = "batch_mac.csv"
 # Command buttons shown in the GUI.  needs_target=True -> asks for a target MAC
 # and builds:  prefix + csv_mac + "," + target_mac
@@ -253,7 +253,7 @@ class SerialWorker(QThread):
                 received = True
                 self.log.emit("RECV", decoded)
 
-                if decoded.startswith("[+]"):
+                if decoded.startswith("[+]") or decoded.startswith("[+]res,"):
                     if decoded not in self._seen_plus_lines:
                         self._seen_plus_lines.add(decoded)
                         self.result.emit(decoded)
@@ -263,8 +263,10 @@ class SerialWorker(QThread):
                         if parts:
                             self._last_res_mac = parts[0].strip().upper()
 
-                    if self._pending_ack is not None and decoded.startswith(self._pending_ack):
-                        self._ack_received = True
+                    if self._pending_ack is not None:
+                        check = decoded[len(RESULT_PREFIX):] if decoded.startswith(RESULT_PREFIX) else decoded
+                        if check.startswith(self._pending_ack):
+                            self._ack_received = True
 
         except (serial.SerialException, OSError) as e:
             self.log.emit("ERROR", f"Serial read error: {e}")

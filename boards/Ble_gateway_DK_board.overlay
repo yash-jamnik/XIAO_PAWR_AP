@@ -7,3 +7,8 @@
 		nordic,pm-ext-flash = &mx25r64;
 	};
 };
+
+&uart20 {
+	status = "okay";
+	current-speed = <1000000>; // <115200>; // <460800>;
+};

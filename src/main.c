@@ -21,9 +21,7 @@
 #include <zephyr/sys/util.h>
 
 /* Variable Declaration for Scanning Usage */
-#define DEVICE_NAME "THINGSX_ESL"		 	//"PARALLEL1"// "PAwR sync sample"   //"TEST_SAMPLE"  // "Internal_testing"
-// #define DEVICE_NAME "PAwR sync sample"
-// #define DEVICE_NAME "PAWR_SYNC_SAMPLE"
+#define DEVICE_NAME "THINGSX_ESL"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS     20
@@ -194,7 +192,8 @@ bool wait_for_connected_state(struct bt_conn *conn, int timeout_ms)
 
         if (info.state == BT_CONN_STATE_CONNECTED) {
             APP_LOG("Conn state: CONNECTED (took ~%d ms)\n", elapsed);
-            APP_LOG("Interval: %d (%d.%02d ms), latency: %d, timeout: %d\n",
+            
+			APP_LOG("Interval: %d (%d.%02d ms), latency: %d, timeout: %d\n",
                     info.le.interval,
                     (info.le.interval * 125) / 100,
                     (info.le.interval * 125) % 100,
@@ -203,7 +202,7 @@ bool wait_for_connected_state(struct bt_conn *conn, int timeout_ms)
         }
 
         if (info.state == BT_CONN_STATE_DISCONNECTED) {
-            APP_LOG("Conn state: DISCONNECTED while waiting — aborting\n");
+			APP_LOG("Conn state: DISCONNECTED while waiting — aborting\n");
             return false;
         }
 
@@ -273,7 +272,7 @@ static int64_t last_onboard_time = 0;
 #define CMD_BUF_SIZE 128
 
 #define MAX_SYNCS (NUM_SUBEVENTS * NUM_RSP_SLOTS)
-#define SLOT_TIMEOUT_MS 45000 // 90 seconds
+#define SLOT_TIMEOUT_MS 60000 * 5 // 90 seconds
 #define INVALID_SLOT 0xFF
 #define ADDR_STR_LEN BT_ADDR_LE_STR_LEN // full bt_addr_le_to_str() string
 
@@ -283,22 +282,7 @@ static bool proto_command_active = false;
 
 static struct bt_uuid_128 pawr_char_uuid =
 	BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef1));
-// static uint16_t pawr_attr_handle;
 
-/*
-subevent = 1;
-slots = 250
-
-	.interval_min = 0xC00,
-	.interval_max = 0xC00,
-	.options = 0,
-	.num_subevents = NUM_SUBEVENTS,
-	.subevent_interval = 0xA0,
-   	.response_slot_delay=0x30;
-	.response_slot_spacing = 40; //0x50,
-	.num_response_slots = NUM_RSP_SLOTS,
-
-*/
 static const struct bt_le_per_adv_param per_adv_params = {
 	.interval_min = 0x140,
 	.interval_max = 0x140,
@@ -334,7 +318,7 @@ static const char default_command[] = "[+]join,9999";
 static char current_command[CMD_BUF_SIZE] = "[+]join,9999";
 
 // Temporary "join" command state: active for N ms, then revert to default
-#define TEMP_CMD_DURATION_MS 5000 // "few seconds" – adjust as you like
+#define TEMP_CMD_DURATION_MS 500 // "few seconds" – adjust as you like
 #define RESPONSE_WINDOW_TIMEOUT_MS 3000
 static bool temp_command_active = false;
 static int64_t temp_command_expiry_ms = 0;
@@ -344,10 +328,9 @@ static int64_t response_window_expiry_ms = 0;
 enum pawr_device_state
 {
 	PAWR_DEVICE_DISCONNECTED = 0,
-	PAWR_DEVICE_SYNCED,
 	PAWR_DEVICE_VERIFYING,
+	PAWR_DEVICE_SYNCED,
 };
-
 
 /* 
 	Structure to store synced device information
@@ -355,10 +338,9 @@ enum pawr_device_state
 */
 struct synced_device
 {
-	int64_t last_update_time;			
 	int64_t last_response_time;
 	int64_t last_sync_time;
-	int64_t active_check_time;
+	int64_t active_check_time; 
 
 	/* 4-Byte Aligned (enum) */
 	enum pawr_device_state state;			// disconnected, synced , verifying
@@ -376,34 +358,45 @@ struct synced_device
 
 static struct synced_device synced_devices[MAX_SYNCS];
 
+static void buf_to_ascii(const uint8_t *data, size_t len,
+                         char *ascii_str, size_t ascii_size)
+{
+    size_t n = MIN(len, ascii_size - 1);
+
+    for (size_t i = 0; i < n; i++)
+    {
+        uint8_t b = data[i];
+        ascii_str[i] = (b >= 32 && b <= 126) ? (char)b : '.';
+    }
+
+    ascii_str[n] = '\0';
+}
+
 // Forward declarations
 void display_synced_devices_status(void);
 void restart_advertising(void);
 
-// Helper: check if a slot is still responsive (based on last_update_time)
+// Helper: check if a slot is still responsive (based on last_response_time)
 static bool is_slot_responsive(int slot_index)
 {
-	if (!synced_devices[slot_index].active)
+	if (slot_index < 0 || slot_index >= MAX_SYNCS)
+		return false;
+
+	struct synced_device *dev = &synced_devices[slot_index];
+
+	if (!dev->active)
 		return false;
 
 	int64_t now = k_uptime_get();
 
-	/* Never received a response yet → allow grace period */
-	if (synced_devices[slot_index].last_response_time == 0)
+	/* No response yet — grace period measured from when it was synced,
+	 * not an unconditional pass. */
+	if (dev->last_response_time == 0)
 	{
-		return true;
+		return (now - dev->last_sync_time) <= SLOT_TIMEOUT_MS;
 	}
 
-	int64_t diff = now - synced_devices[slot_index].last_response_time;
-
-	if (diff > SLOT_TIMEOUT_MS)
-	{
-		// APP_LOG("Slot %d lost device (no PAwR response for %lld ms)\n",
-		// 		slot_index, diff);
-		return false;
-	}
-
-	return true;
+	return (now - dev->last_response_time) <= SLOT_TIMEOUT_MS;
 }
 
 // Clear a slot completely (only for errors/timeouts, not normal disconnect)
@@ -411,8 +404,7 @@ static void clear_slot(int slot_index)
 {
 	if (synced_devices[slot_index].active)
 	{
-		APP_LOG("[+]DISCONNECTED,%s\n",
-				synced_devices[slot_index].address);
+		APP_LOG("[+]DISCONNECTED,%s slotIndex\n",synced_devices[slot_index].address,slot_index);
 		if (num_synced > 0)
 		{
 			num_synced--;
@@ -425,7 +417,6 @@ static void clear_slot(int slot_index)
 	synced_devices[slot_index].response_slot = INVALID_SLOT;
 
 	memset(synced_devices[slot_index].address, 0, sizeof(synced_devices[slot_index].address));
-	synced_devices[slot_index].last_update_time = 0;
 	synced_devices[slot_index].last_response_time = 0;
 	synced_devices[slot_index].last_sync_time = 0;
 	synced_devices[slot_index].active_check_pending = false;
@@ -445,14 +436,12 @@ static void clear_slot_silent(int slot_index)
 			num_synced--;
 		}
 	}
-	synced_devices[slot_index].state = PAWR_DEVICE_DISCONNECTED;
 	synced_devices[slot_index].active = false;
 	synced_devices[slot_index].subevent = INVALID_SLOT;
 	synced_devices[slot_index].response_slot = INVALID_SLOT;
 
 	memset(synced_devices[slot_index].address, 0, sizeof(synced_devices[slot_index].address));
 
-	synced_devices[slot_index].last_update_time = 0;
 	synced_devices[slot_index].last_response_time = 0;
 	synced_devices[slot_index].last_sync_time = 0;
 	synced_devices[slot_index].active_check_pending = false;
@@ -469,15 +458,13 @@ static int find_or_assign_slot(const char *address, uint8_t *subevent, uint8_t *
 	// First, search for an existing active slot with same address
 	for (int i = 0; i < MAX_SYNCS; i++)
 	{
-		if (synced_devices[i].active &&
-			strcmp(synced_devices[i].address, address) == 0)
+		if (synced_devices[i].active && strcmp(synced_devices[i].address, address) == 0)
 		{
 			// Check if the slot is still responsive
 			if (is_slot_responsive(i))
 			{
 				*subevent = synced_devices[i].subevent;
 				*response_slot = synced_devices[i].response_slot;
-				synced_devices[i].last_update_time = k_uptime_get();
 
 				APP_LOG("[+]new,%s\n", address);
 				APP_LOG("Reusing slot %d for device %s (subevent %d, response_slot %d)\n",
@@ -500,16 +487,13 @@ static int find_or_assign_slot(const char *address, uint8_t *subevent, uint8_t *
 			*subevent = i % NUM_SUBEVENTS;
 			*response_slot = i / NUM_SUBEVENTS;
 
-			strncpy(synced_devices[i].address, address,
-					sizeof(synced_devices[i].address) - 1);
+			strncpy(synced_devices[i].address, address, sizeof(synced_devices[i].address) - 1);
 			synced_devices[i].address[sizeof(synced_devices[i].address) - 1] = '\0';
 
 			synced_devices[i].active = true;
 			synced_devices[i].state = PAWR_DEVICE_SYNCED;
 			synced_devices[i].subevent = *subevent;
 			synced_devices[i].response_slot = *response_slot;
-			synced_devices[i].last_update_time = k_uptime_get();
-
 			num_synced++;
 			APP_LOG("[+]new,%s\n", synced_devices[i].address);
 			APP_LOG("Assigned new slot %d for device %s (subevent %d, response_slot %d)\n",
@@ -575,6 +559,44 @@ static int send_command_to_synced_devices(struct bt_le_ext_adv *pawr_adv, const 
 
 	return 0;
 }
+
+static int find_slot_by_subevent_slot(uint8_t subevent, uint8_t response_slot)
+{
+	for (int i = 0; i < MAX_SYNCS; i++)
+	{
+		if (synced_devices[i].active &&
+			synced_devices[i].subevent == subevent &&
+			synced_devices[i].response_slot == response_slot)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void mark_slot_active(int idx, uint8_t subevent, uint8_t response_slot)
+{
+	if (idx < 0 || idx >= MAX_SYNCS)
+		return;
+
+	struct synced_device *dev = &synced_devices[idx];
+
+	dev->last_response_time = k_uptime_get();
+	dev->subevent = subevent;
+	dev->response_slot = response_slot;
+
+	if (!dev->active) {
+		dev->active = true;
+		num_synced++;
+		APP_LOG("Slot %d reactivated for %s (subevent %d, slot %d)\n",
+				idx, dev->address, subevent, response_slot);
+	}
+
+	if (dev->state == PAWR_DEVICE_VERIFYING) {
+		dev->state = PAWR_DEVICE_SYNCED;
+	}
+}
+
 
 static void format_mac_hex(const uint8_t *mac,
 						char *out,
@@ -1187,7 +1209,7 @@ void join_command(void *pawr_adv_ptr, void *unused1, void *unused2)
 			cmd_buf[sizeof(cmd_buf) - 1] = '\0';
 			APP_LOG("\nUART: Command received: '%s'\n", cmd_buf);
 			process_command(pawr_adv, cmd_buf);
-			APP_LOG(">>> ");
+			// APP_LOG(">>> ");
 		}
 		k_sleep(K_MSEC(1));
 	}
@@ -1235,10 +1257,10 @@ static void update_response_window_state(void)
 static void request_cb(struct bt_le_ext_adv *adv,
 					const struct bt_le_per_adv_data_request *request)
 {
+	// APP_LOG("requst cb fired\n");
 	int err;
 	uint8_t to_send;
 	struct net_buf_simple *buf;
-
 	update_temp_command_state();
 	update_response_window_state();
 	
@@ -1351,7 +1373,7 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 		for (size_t i = 0; i < to_send; i++)
 		{
-		APP_LOG("[request_cb] i=%d se=%d slot_start=%d slot_count=%d datalen=%d\n",
+			APP_LOG("[request_cb] i=%d se=%d slot_start=%d slot_count=%d datalen=%d\n",
 			(int)i,
 			subevent_data_params[i].subevent,
 			subevent_data_params[i].response_slot_start,
@@ -1377,6 +1399,8 @@ static int find_slot_by_mac(const char *mac_str)
 }
 
 
+/* Mark a slot as freshly responsive: stamps time, records subevent/slot,
+ * and re-activates the slot if it had lapsed. */
 static void response_cb(struct bt_le_ext_adv *adv,
 						struct bt_le_per_adv_response_info *info,
 						struct net_buf_simple *buf)
@@ -1386,25 +1410,15 @@ static void response_cb(struct bt_le_ext_adv *adv,
 		return;
 	}
 
-	// {
-		/* Print data in the hex and the ascii */
-	char hex_str[3 * PACKET_SIZE + 1] = {0};
-	char ascii_str[PACKET_SIZE + 1] = {0};
-	size_t n = MIN(buf->len, PACKET_SIZE);
-	size_t pos = 0;
+	char ascii_str[PACKET_SIZE + 1];
+	buf_to_ascii(buf->data, buf->len, ascii_str, sizeof(ascii_str));
+	// APP_LOG("[response_cb] event:%d slot:%d\n",  info->subevent, info->response_slot);
 
-	for (size_t i = 0; i < n; i++)
-	{
-		pos += snprintf(&hex_str[pos], sizeof(hex_str) - pos,
-							"%02X ", buf->data[i]);
-		uint8_t b = buf->data[i];
-		ascii_str[i] = (b >= 32 && b <= 126) ? (char)b : '.';
+	/* Any response at all in an assigned slot = liveness signal */
+	int idx = find_slot_by_subevent_slot(info->subevent, info->response_slot);
+	if (idx >= 0) {
+		mark_slot_active(idx, info->subevent, info->response_slot);
 	}
-	ascii_str[n] = '\0';
-
-	// APP_LOG("[responce_cb] se=%d slot=%d raw[%d]: hex=[%s]\n",
-	// 		info->subevent, info->response_slot, buf->len,
-	// 		hex_str);
 
 	if (buf->len > 3)
 	{
@@ -1419,36 +1433,16 @@ static void response_cb(struct bt_le_ext_adv *adv,
 							ack_mac, sizeof(ack_mac),
 							&status, &type)){
 			APP_LOG("[+]res,[+]%s,%s event:%d slot:%d\n", cmd_type_name(type), ack_mac, info->subevent, info->response_slot);
-			int idx = find_slot_by_mac(ack_mac);
-			if (idx >= 0){
-				synced_devices[idx].last_response_time = k_uptime_get();
-			}
 		}else if (decode_tel_response(buf->data, buf->len,
 							tel_mac, sizeof(tel_mac),
 							tel_meta, sizeof(tel_meta))){
 			APP_LOG("[+]res,[+]tel,%s,%s, event:%d slot:%d\n", tel_mac, tel_meta, info->subevent, info->response_slot);
-			int idx = find_slot_by_mac(tel_mac);
-			if (idx >= 0){
-				synced_devices[idx].last_response_time = k_uptime_get();
-			}
-		}else
+		}else if(buf->len > 20)
 		{
 			// APP_LOG("[responce_cb] decoding failed, %s\n", ascii_str);
 			/* Even though we couldn't decode payload, something answered in this
 			* slot — treat it as a liveness signal if the slot is assigned. */
-			for (int i = 0; i < MAX_SYNCS; i++)
-			{
-				if (synced_devices[i].active &&
-					synced_devices[i].subevent == info->subevent &&
-					synced_devices[i].	response_slot == info->response_slot)
-				{
-					synced_devices[i].last_response_time = k_uptime_get();
-					break;
-				}
-			}
-			if(buf->len > 20){
-				APP_LOG("%s subevent:%d response: %d\n", ascii_str, info->subevent, info->response_slot);
-			}
+			APP_LOG("[rc]se=%d slot=%d raw[%d]: hex=[%s]\n",info->subevent, info->response_slot, buf->len,ascii_str);
 		}
 	}
 }
@@ -1481,7 +1475,7 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 		
 		k_sem_give(&sem_connected);
 		k_sem_give(&sem_disconnected);   /* signal AFTER this thread is truly done */
-		return;		
+		return;
 	}
 
 	struct wdisc_job job;
@@ -1490,7 +1484,7 @@ void connected_cb(struct bt_conn *conn, uint8_t err)
 
     char addr_str[BT_ADDR_LE_STR_LEN];
     bt_addr_le_to_str(&job.addr, addr_str, sizeof(addr_str));
-    APP_LOG("[connected_cb] connection established for %s\n", addr_str);
+    APP_LOG("connected %s\n", addr_str);
 
     if (k_msgq_put(&wdisc_job_q, &job, K_NO_WAIT) != 0) {
         APP_LOG("[connected_cb] wdisc queue full, dropping connection %s\n", addr_str);
@@ -1511,7 +1505,7 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 	    reason == BT_HCI_ERR_LOCALHOST_TERM_CONN) {
 			/* graceful, expected */
 	} else if (reason == BT_HCI_ERR_CONN_TIMEOUT) {
-		APP_LOG("[disconnected_cb] Supervision timeout for this device — link dropped abnormally\n");
+		APP_LOG("disconnected Supervision timeout — link dropped abnormally\n");
 		/* consider: mark this MAC for a longer backoff/cooldown before
 		 * scan_thread re-attempts a connect, since the controller may
 		 * need time to release resources internally */
@@ -1540,7 +1534,7 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 				if (synced_devices[i].active &&
 					strcmp(synced_devices[i].address, addr_str) == 0)
 				{
-					APP_LOG("[disconnected_cb] Device %s disconnected, keeping slot %d (subevent %d, slot %d)\n",
+					APP_LOG("disconnected %s, slot %d (subevent %d, slot %d)\n",
 							addr_str,
 							i,
 							synced_devices[i].subevent,
@@ -1562,7 +1556,6 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 
 	/* release onboarding lock */
 	last_onboard_time = k_uptime_get();
-	atomic_set(&onboarding_busy, 0);
 }
 
 void remote_info_available_cb(struct bt_conn *conn, struct bt_conn_remote_info *remote_info)
@@ -1600,8 +1593,7 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 
 		char addr_str[BT_ADDR_LE_STR_LEN];
 		bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
-		APP_LOG("[device_found] Matched device %d/%d: %s rssi %d\n",
-				scan_result_count, MAX_SCAN_RESULTS, addr_str, rssi);
+		APP_LOG("[dev_found] %d/%d: %s rssi %d\n", scan_result_count, MAX_SCAN_RESULTS, addr_str, rssi);
 
 		if (scan_result_count >= MAX_SCAN_RESULTS) {
 			k_sem_give(&scan_done_sem); /* early exit: 20 found */
@@ -1624,7 +1616,7 @@ static void flush_results_to_queue(void)
 		}
 	}
 
-	APP_LOG("[flush_result] Flushed %d results to queue\n", scan_result_count);
+	APP_LOG("Flushed %d results to queue\n", scan_result_count);
 	scan_result_count = 0;
 
 	k_mutex_unlock(&results_mutex);
@@ -1691,9 +1683,9 @@ void display_synced_devices_status(void)
 			}
 		}
 	}
-
 	APP_LOG("Synced devices: %d\n", active_count);
 }
+
 void cleanup_inactive_slots(void)
 {
 
@@ -2064,7 +2056,7 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 
 	if (proceed) {
 		int64_t write_time = k_uptime_get();
-		int64_t sync_wait_timeout_ms = 6000;
+		int64_t sync_wait_timeout_ms = 3000;
 		bool got_response = false;
 
 		APP_LOG("Waiting for PAwR sync confirmation from %s...\n", addr_str);
@@ -2078,7 +2070,7 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 			}
 			if (!conn_is_live(self->conn)) {
 				APP_LOG("PAwR sync wait aborted for %s — connection dropped\n", addr_str);
-				break;
+				// break;
 			}
 			k_sleep(K_MSEC(100));
 		}
@@ -2125,7 +2117,7 @@ void wdisc_worker_thread(void *p1, void *p2, void *p3)
 	struct wdisc_worker *self = p1;
 	struct wdisc_job job;
 
-	APP_LOG("wdisc worker %d ready\n", self->id);
+	// APP_LOG("wdisc worker %d ready\n", self->id);
 
 	while (1) {
 		k_msgq_get(&wdisc_job_q, &job, K_FOREVER);
@@ -2173,8 +2165,10 @@ void main_thread(void *p1, void *p2, void *p3)
 
 	while (1)
 	{
-		k_sleep(K_SECONDS(5));
-		cleanup_inactive_slots();
+		k_sleep(K_SECONDS(60 * 1));
+		if (num_synced >= MAX_SYNCS) {
+			cleanup_inactive_slots();
+		}
 	}
 }
 
@@ -2182,16 +2176,16 @@ int app_initilisation(void){
 	int err;
 	uint8_t flag = 0;
 
-	APP_LOG("APPLICATION STARTED 2\n");
+	APP_LOG("APPLICATION STARTED with Firmware Version \n");
+	APP_LOG("\n========== Firmware Version ==========\n");
+	APP_LOG("Version : %s\n", APP_VERSION_STRING);
+	APP_LOG("%s\n", "1000000 clean slot improved and synced_device minor updates");
 
 	init_bufs();
 	err = nvs_init_app();
 	if (err) { APP_LOG("NVS initialization failed (err %d)\n", err); return 0; }
 
-	/* 	UART20 - for Development Board 
-		UART30 - for Gateway Board.
-	*/
-
+	/*  UART20 - for Development Board ||	UART30 - for Gateway Board. */
 	uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart30));
 	if (!device_is_ready(uart_dev)) { APP_LOG("UART device not ready!\n"); return 0; }
 
@@ -2247,6 +2241,8 @@ int main(void)
 		APP_LOG("Application Initialised Failed \n \n");		
 	}
 
+	APP_LOG("DEVICE Name : %s\n", DEVICE_NAME);
+
 	k_thread_create(&scan_thread_data, scan_thread_stack, SCAN_THREAD_STACK_SIZE,
 					scan_thread, NULL, NULL, NULL,
 					SCAN_THREAD_PRIORITY, 0, K_NO_WAIT);
@@ -2271,26 +2267,9 @@ int main(void)
 			APP_LOG("Current command: %s | temp_active: %s\n", current_command,
 					temp_command_active ? "true" : "false");
 		}
-		cleanup_inactive_slots();
+		// cleanup_inactive_slots();
 		k_sleep(K_SECONDS(5));
 	}
-
-	/* ---- Functions are never going to run ---- */
-	/* ---- rest of function unchanged ---- */
-	APP_LOG("Maximum number of syncs onboarded: %d devices\n", num_synced);
-	APP_LOG("System ready - listening for commands via UART\n");
-	APP_LOG("Command format: number OR join,<param> OR [+]join,<param>\n");
-	APP_LOG("Example: 1234  (sends [+]join,1234 for a few seconds)\n");
-
-	APP_LOG("\n=== Synced Devices Status ===\n");
-	for (int i = 0; i < MAX_SYNCS; i++) {
-		if (synced_devices[i].active) {
-			APP_LOG("Device %d: subevent %d, response_slot %d, addr %s\n",
-					i, synced_devices[i].subevent,
-					synced_devices[i].response_slot, synced_devices[i].address);
-		}
-	}
-	APP_LOG("============================\n\n");
 
 	return 0;
 }

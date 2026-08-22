@@ -21,10 +21,10 @@
 #include <zephyr/sys/util.h>
 
 /* Variable Declaration for Scanning Usage */
-#define DEVICE_NAME "THINGSX_ESL"
-
+#define DEVICE_NAME "THINGSX_ESL" //
+ 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
-#define MAX_SCAN_RESULTS     20
+#define MAX_SCAN_RESULTS      20
 #define SCAN_WINDOW_SECONDS   10
 
 /* ---- Result storage ---- */
@@ -99,6 +99,11 @@ static struct k_thread main_thread_data;
 K_THREAD_STACK_DEFINE(join_thread_stack, JOIN_THREAD_STACK_SIZE);
 struct k_thread join_thread_data;
 
+// #define PING_THREAD_STACK_SIZE 1024
+// #define PING_THREAD_PRIORITY 5
+// K_THREAD_STACK_DEFINE(ping_thread_stack, PING_THREAD_STACK_SIZE);
+// struct k_thread ping_thread_data;
+
 #define WDISC_THREAD_STACK_SIZE 2048
 #define WDISC_THREAD_PRIORITY 5
 K_THREAD_STACK_ARRAY_DEFINE(wdisc_stacks, WDISC_POOL_MAX, WDISC_THREAD_STACK_SIZE);
@@ -107,6 +112,7 @@ static int wdisc_pool_size;
 
 static K_SEM_DEFINE(sem_connected, 0, 1);
 static K_SEM_DEFINE(sem_disconnected, 0, 1);
+static K_SEM_DEFINE(ping_received, 0, 1);
 
 static struct nvs_fs fs;
 static char active_command_mac[BT_ADDR_STR_LEN] = {0};
@@ -275,6 +281,7 @@ static int64_t last_onboard_time = 0;
 #define SLOT_TIMEOUT_MS 60000 * 5 // 90 seconds
 #define INVALID_SLOT 0xFF
 #define ADDR_STR_LEN BT_ADDR_LE_STR_LEN // full bt_addr_le_to_str() string
+#define ADD_STR_TIN 13
 
 static uint8_t proto_buf[PACKET_SIZE];
 static size_t proto_len = 0;
@@ -318,7 +325,7 @@ static const char default_command[] = "[+]join,9999";
 static char current_command[CMD_BUF_SIZE] = "[+]join,9999";
 
 // Temporary "join" command state: active for N ms, then revert to default
-#define TEMP_CMD_DURATION_MS 500 // "few seconds" – adjust as you like
+#define TEMP_CMD_DURATION_MS 100 // "few seconds" – adjust as you like
 #define RESPONSE_WINDOW_TIMEOUT_MS 3000
 static bool temp_command_active = false;
 static int64_t temp_command_expiry_ms = 0;
@@ -959,7 +966,7 @@ static void process_command(struct bt_le_ext_adv *pawr_adv, const char *cmd)
 		APP_LOG("[processing]: [+]TEL_PROTO_READY\n");
 	}
 	else if (strcmp(cmd, "[+]ping_all") == 0 || strcmp(cmd, "ping_all") == 0)
-	{
+	{		
 		APP_LOG("TEL_ALL: polling all synced devices\n");
 		display_synced_devices_status();
 
@@ -1254,9 +1261,21 @@ static void update_response_window_state(void)
 	}
 }
 
+
 static void request_cb(struct bt_le_ext_adv *adv,
 					const struct bt_le_per_adv_data_request *request)
 {
+	// static int64_t last_call_time = 0;
+    // int64_t now = k_uptime_get();
+
+    // if (last_call_time != 0)
+    // {
+    //     int64_t delta = now - last_call_time;
+    //     APP_LOG("request_cb fired: delta = %lld ms\n", delta);
+    // }
+
+    // last_call_time = now;
+
 	// APP_LOG("requst cb fired\n");
 	int err;
 	uint8_t to_send;
@@ -1297,6 +1316,11 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		}
 
 		bt_le_per_adv_set_subevent_data(adv, NUM_SUBEVENTS, subevent_data_params);
+		
+		// strncpy(current_command, default_command, CMD_BUF_SIZE - 1);
+		// current_command[CMD_BUF_SIZE - 1] = '\0';
+		// temp_command_active = false;
+
 		return;
 	}
 
@@ -1382,6 +1406,9 @@ static void request_cb(struct bt_le_ext_adv *adv,
 		}
 		return;
 	}
+	// strncpy(current_command, default_command, CMD_BUF_SIZE - 1);
+	// current_command[CMD_BUF_SIZE - 1] = '\0';
+	// temp_command_active = false;
 }
 
 /* Find synced_devices[] index by MAC string. Returns -1 if not found. */
@@ -1398,6 +1425,22 @@ static int find_slot_by_mac(const char *mac_str)
 	return -1;
 }
 
+void decode_en(const uint8_t *data, size_t len, char code[13])
+{
+    memset(code, 0, 13);
+
+    for (size_t i = 0; i + 1 < len; i++)
+    {
+        if (data[i] == 'E' && data[i+1] == 'N')
+        {
+            size_t n = MIN(len - i, 12);
+            memcpy(code, data + i, n);
+            break;
+        }
+    }
+
+    // printf("%s\n", code);
+}
 
 /* Mark a slot as freshly responsive: stamps time, records subevent/slot,
  * and re-activates the slot if it had lapsed. */
@@ -1406,13 +1449,24 @@ static void response_cb(struct bt_le_ext_adv *adv,
 						struct net_buf_simple *buf)
 {
 	ARG_UNUSED(adv);
+
+	// static int64_t last_call_time = 0;
+    // int64_t now = k_uptime_get();
+
+    // if (last_call_time != 0)
+    // {
+    //     int64_t delta = now - last_call_time;
+    //     APP_LOG("response fired: delta = %lld ms\n", delta);
+    // }
+
+    // last_call_time = now;
+
 	if (!buf){
 		return;
 	}
 
 	char ascii_str[PACKET_SIZE + 1];
 	buf_to_ascii(buf->data, buf->len, ascii_str, sizeof(ascii_str));
-	// APP_LOG("[response_cb] event:%d slot:%d\n",  info->subevent, info->response_slot);
 
 	/* Any response at all in an assigned slot = liveness signal */
 	int idx = find_slot_by_subevent_slot(info->subevent, info->response_slot);
@@ -1439,10 +1493,10 @@ static void response_cb(struct bt_le_ext_adv *adv,
 			APP_LOG("[+]res,[+]tel,%s,%s, event:%d slot:%d\n", tel_mac, tel_meta, info->subevent, info->response_slot);
 		}else if(buf->len > 20)
 		{
-			// APP_LOG("[responce_cb] decoding failed, %s\n", ascii_str);
-			/* Even though we couldn't decode payload, something answered in this
-			* slot — treat it as a liveness signal if the slot is assigned. */
-			APP_LOG("[rc]se=%d slot=%d raw[%d]: hex=[%s]\n",info->subevent, info->response_slot, buf->len,ascii_str);
+			APP_LOG("%s %d %d\n",ascii_str, info->subevent, info->response_slot);
+			// char tin_numeric[ADD_STR_TIN];	
+			// decode_en(buf->data, buf->len, tin_numeric);
+			// APP_LOG("%s\n", tin_numeric);		
 		}
 	}
 }
@@ -2154,6 +2208,16 @@ void wdisc_pool_init(int n)
     wdisc_pool_size = n;
 }
 
+// void ping_thread(void *p1, void *p2, void *p3){
+// 	ARG_UNUSED(p1);
+// 	ARG_UNUSED(p2);
+// 	ARG_UNUSED(p3);
+
+// 	APP_LOG("Ping Thread Running\n\n");
+// 	while(1){
+
+// 	}
+// }
 
 void main_thread(void *p1, void *p2, void *p3)
 {
@@ -2179,7 +2243,7 @@ int app_initilisation(void){
 	APP_LOG("APPLICATION STARTED with Firmware Version \n");
 	APP_LOG("\n========== Firmware Version ==========\n");
 	APP_LOG("Version : %s\n", APP_VERSION_STRING);
-	APP_LOG("%s\n", "1000000 clean slot improved and synced_device minor updates");
+	APP_LOG("Scanning for the device name : %s\n",DEVICE_NAME);
 
 	init_bufs();
 	err = nvs_init_app();
@@ -2241,8 +2305,6 @@ int main(void)
 		APP_LOG("Application Initialised Failed \n \n");		
 	}
 
-	APP_LOG("DEVICE Name : %s\n", DEVICE_NAME);
-
 	k_thread_create(&scan_thread_data, scan_thread_stack, SCAN_THREAD_STACK_SIZE,
 					scan_thread, NULL, NULL, NULL,
 					SCAN_THREAD_PRIORITY, 0, K_NO_WAIT);
@@ -2258,6 +2320,10 @@ int main(void)
 	k_thread_create(&main_thread_data, main_thread_stack, MAIN_THREAD_STACK_SIZE,
 					main_thread, NULL, NULL, NULL,
 					MAIN_THREAD_PRIORITY, 0, K_NO_WAIT);
+	
+	// k_thread_create(&ping_thread_data, ping_thread_stack, PING_THREAD_STACK_SIZE,
+	// 				ping_thread, NULL, NULL, NULL,
+	// 				MAIN_THREAD_PRIORITY, 0, K_NO_WAIT);
 
 	while(1){
 		static int status_counter = 0;

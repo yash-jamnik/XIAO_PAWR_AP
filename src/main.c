@@ -19,13 +19,16 @@
 #include <zephyr/app_version.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/logging/log.h>
 
 /* Variable Declaration for Scanning Usage */
-#define DEVICE_NAME "THINGSX_ESL" //
- 
+#define DEVICE_NAME  "manoj" // "THINGSX_ESL" //
+
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS      20
 #define SCAN_WINDOW_SECONDS   10
+
+LOG_MODULE_REGISTER(ping_thread, LOG_LEVEL_INF);
 
 /* ---- Result storage ---- */
 struct scan_result_t {
@@ -49,6 +52,14 @@ struct wdisc_job {
     struct bt_conn  *conn;   /* ref already held from bt_conn_le_create */
 };
 
+#define CODE_LEN  13
+#define BATCH_MAX 20
+#define BATCH_TIMEOUT_MS 5000
+
+struct uart_msg {
+    char tin_number[CODE_LEN];
+};
+
 static bool tel_all_active = false;
 #define PAWR_EVENT_MS 3840
 #define TEL_ALL_DURATION_MS (3 * PAWR_EVENT_MS + 500) /* keep proto alive ~3 events */
@@ -57,9 +68,11 @@ static bool tel_all_active = false;
 #define WDISC_QUEUE_LEN 16
 K_MSGQ_DEFINE(wdisc_job_q, sizeof(struct wdisc_job), WDISC_QUEUE_LEN, 4);
 K_MSGQ_DEFINE(scan_result_msgq, sizeof(struct scan_result_t), MAX_SCAN_RESULTS, 4);
+K_MSGQ_DEFINE(uart_msgq, sizeof(struct uart_msg), 32, 4);
 
 #define WDISC_POOL_SIZE 5      /* start here */
 #define WDISC_POOL_MAX  10     /* ceiling you can bump to */
+
 
 struct wdisc_worker {
     int id;
@@ -99,10 +112,10 @@ static struct k_thread main_thread_data;
 K_THREAD_STACK_DEFINE(join_thread_stack, JOIN_THREAD_STACK_SIZE);
 struct k_thread join_thread_data;
 
-// #define PING_THREAD_STACK_SIZE 1024
-// #define PING_THREAD_PRIORITY 5
-// K_THREAD_STACK_DEFINE(ping_thread_stack, PING_THREAD_STACK_SIZE);
-// struct k_thread ping_thread_data;
+#define PING_THREAD_STACK_SIZE 1024
+#define PING_THREAD_PRIORITY 5
+K_THREAD_STACK_DEFINE(ping_thread_stack, PING_THREAD_STACK_SIZE);
+struct k_thread ping_thread_data;
 
 #define WDISC_THREAD_STACK_SIZE 2048
 #define WDISC_THREAD_PRIORITY 5
@@ -162,6 +175,19 @@ int parse_mac(const char *str, uint8_t *mac)
 				&mac[3], &mac[4], &mac[5]);
 }
 
+/* ---- Producer: call this after decode_en ---- */
+void queue_uart_data(const char code[CODE_LEN])
+{
+    struct uart_msg msg;
+    memcpy(msg.tin_number, code, CODE_LEN);
+
+    int ret = k_msgq_put(&uart_msgq, &msg, K_NO_WAIT);
+    if (ret != 0)
+    {
+        APP_LOG("uart_msgq full, dropping packet (ret=%d)\n", ret);
+    }
+}
+
 static void conn_state_check_cb(struct bt_conn *conn, void *user_data)
 {
 	bool *busy = user_data;
@@ -197,18 +223,12 @@ bool wait_for_connected_state(struct bt_conn *conn, int timeout_ms)
         }
 
         if (info.state == BT_CONN_STATE_CONNECTED) {
-            APP_LOG("Conn state: CONNECTED (took ~%d ms)\n", elapsed);
-            
-			APP_LOG("Interval: %d (%d.%02d ms), latency: %d, timeout: %d\n",
-                    info.le.interval,
-                    (info.le.interval * 125) / 100,
-                    (info.le.interval * 125) % 100,
-                    info.le.latency, info.le.timeout);
+            APP_LOG("CONNECTED (took ~%d ms)\n", elapsed);
             return true;
         }
 
         if (info.state == BT_CONN_STATE_DISCONNECTED) {
-			APP_LOG("Conn state: DISCONNECTED while waiting — aborting\n");
+			APP_LOG("DISCONNECTED while waiting — aborting\n");
             return false;
         }
 
@@ -325,7 +345,7 @@ static const char default_command[] = "[+]join,9999";
 static char current_command[CMD_BUF_SIZE] = "[+]join,9999";
 
 // Temporary "join" command state: active for N ms, then revert to default
-#define TEMP_CMD_DURATION_MS 100 // "few seconds" – adjust as you like
+#define TEMP_CMD_DURATION_MS 5000 // "few seconds" – adjust as you like
 #define RESPONSE_WINDOW_TIMEOUT_MS 3000
 static bool temp_command_active = false;
 static int64_t temp_command_expiry_ms = 0;
@@ -1311,7 +1331,7 @@ static void request_cb(struct bt_le_ext_adv *adv,
 
 			subevent_data_params[i].subevent = i;
 			subevent_data_params[i].response_slot_start = 0;
-			subevent_data_params[i].response_slot_count = 0; // still no responses while onboarding
+			subevent_data_params[i].response_slot_count = MAX_SYNCS; // still no responses while onboarding
 			subevent_data_params[i].data = buf;
 		}
 
@@ -1493,10 +1513,11 @@ static void response_cb(struct bt_le_ext_adv *adv,
 			APP_LOG("[+]res,[+]tel,%s,%s, event:%d slot:%d\n", tel_mac, tel_meta, info->subevent, info->response_slot);
 		}else if(buf->len > 20)
 		{
-			APP_LOG("%s %d %d\n",ascii_str, info->subevent, info->response_slot);
-			// char tin_numeric[ADD_STR_TIN];	
-			// decode_en(buf->data, buf->len, tin_numeric);
-			// APP_LOG("%s\n", tin_numeric);		
+			// APP_LOG("%s %d %d\n",ascii_str, info->subevent, info->response_slot);
+			char tin_numeric[ADD_STR_TIN];	
+			decode_en(buf->data, buf->len, tin_numeric);
+			queue_uart_data(tin_numeric);
+			// APP_LOG("%s [from callback]\n", tin_numeric);		
 		}
 	}
 }
@@ -1572,7 +1593,7 @@ void disconnected_cb(struct bt_conn *conn, uint8_t reason)
         bt_addr_le_to_str(dev_addr, addr_str, sizeof(addr_str));
     }
 
-	APP_LOG("[disconnected_cb] : %s, reason 0x%02X %s\n\n",
+	APP_LOG("disconnected : %s, reason 0x%02X %s\n\n",
             dev_addr ? addr_str : "(unknown)", reason, bt_hci_err_to_str(reason));
 
 	if (conn && dev_addr)
@@ -2113,7 +2134,7 @@ static void wdisc_process_job(struct wdisc_worker *self, struct wdisc_job *job)
 		int64_t sync_wait_timeout_ms = 3000;
 		bool got_response = false;
 
-		APP_LOG("Waiting for PAwR sync confirmation from %s...\n", addr_str);
+		APP_LOG("Waiting PAwR sync from %s...\n", addr_str);
 
 		while (k_uptime_get() - write_time < sync_wait_timeout_ms) {
 			if (synced_devices[slot_idx].last_response_time > write_time) {
@@ -2208,16 +2229,82 @@ void wdisc_pool_init(int n)
     wdisc_pool_size = n;
 }
 
-// void ping_thread(void *p1, void *p2, void *p3){
-// 	ARG_UNUSED(p1);
-// 	ARG_UNUSED(p2);
-// 	ARG_UNUSED(p3);
+/* Check if code already exists in the batch so far */
+static bool code_exists(char batch_buf[][CODE_LEN], size_t count, const char *code)
+{
+    for (size_t i = 0; i < count; i++)
+    {
+        if (strncmp(batch_buf[i], code, CODE_LEN) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
-// 	APP_LOG("Ping Thread Running\n\n");
-// 	while(1){
+/* ---- Consumer thread: batches up to 20 entries or 10s timeout ---- */
+void ping_thread(void *p1, void *p2, void *p3){
+    struct uart_msg msg;
+    char codes[BATCH_MAX][CODE_LEN];
+    size_t batch_count;
+    int64_t batch_start_time;
 
-// 	}
-// }
+    while (1)
+    {
+        batch_count = 0;
+
+        /* Wait for first item */
+        k_msgq_get(&uart_msgq, &msg, K_FOREVER);
+        batch_start_time = k_uptime_get();
+
+        memcpy(codes[batch_count], msg.tin_number, CODE_LEN);
+        batch_count++;
+
+        while (batch_count < BATCH_MAX)
+        {
+            int64_t elapsed = k_uptime_get() - batch_start_time;
+            int64_t remaining = BATCH_TIMEOUT_MS - elapsed;
+
+            if (remaining <= 0)
+            {
+                break;
+            }
+
+            int ret = k_msgq_get(&uart_msgq, &msg, K_MSEC(remaining));
+            if (ret != 0)
+            {
+                break;
+            }
+
+            /* Skip duplicates */
+            if (code_exists(codes, batch_count, msg.tin_number))
+            {
+                continue;  /* discard, don't add to batch, don't count toward BATCH_MAX */
+            }
+
+            memcpy(codes[batch_count], msg.tin_number, CODE_LEN);
+            batch_count++;
+        }
+
+        /* Build comma-separated output from unique codes */
+        char batch_buf[BATCH_MAX * CODE_LEN + 1];
+        size_t buf_pos = 0;
+
+        for (size_t i = 0; i < batch_count; i++)
+        {
+            if (i > 0)
+            {
+                batch_buf[buf_pos++] = ',';
+            }
+            size_t len = strnlen(codes[i], CODE_LEN);
+            memcpy(&batch_buf[buf_pos], codes[i], len);
+            buf_pos += len;
+        }
+        batch_buf[buf_pos] = '\0';
+		// LOG_INF("Sending ping packet...");
+        LOG_INF("[+]res,ping,%s\n", batch_buf);
+    }
+}
 
 void main_thread(void *p1, void *p2, void *p3)
 {
@@ -2239,11 +2326,6 @@ void main_thread(void *p1, void *p2, void *p3)
 int app_initilisation(void){
 	int err;
 	uint8_t flag = 0;
-
-	APP_LOG("APPLICATION STARTED with Firmware Version \n");
-	APP_LOG("\n========== Firmware Version ==========\n");
-	APP_LOG("Version : %s\n", APP_VERSION_STRING);
-	APP_LOG("Scanning for the device name : %s\n",DEVICE_NAME);
 
 	init_bufs();
 	err = nvs_init_app();
@@ -2304,6 +2386,11 @@ int main(void)
 	}else{
 		APP_LOG("Application Initialised Failed \n \n");		
 	}
+	
+	APP_LOG("APPLICATION STARTED with Firmware Version \n");
+	APP_LOG("\n========== Firmware Version ==========\n");
+	APP_LOG("Version : %s\n", APP_VERSION_STRING);
+	APP_LOG("Scanning for the device name : %s\n", DEVICE_NAME);
 
 	k_thread_create(&scan_thread_data, scan_thread_stack, SCAN_THREAD_STACK_SIZE,
 					scan_thread, NULL, NULL, NULL,
@@ -2321,9 +2408,9 @@ int main(void)
 					main_thread, NULL, NULL, NULL,
 					MAIN_THREAD_PRIORITY, 0, K_NO_WAIT);
 	
-	// k_thread_create(&ping_thread_data, ping_thread_stack, PING_THREAD_STACK_SIZE,
-	// 				ping_thread, NULL, NULL, NULL,
-	// 				MAIN_THREAD_PRIORITY, 0, K_NO_WAIT);
+	k_thread_create(&ping_thread_data, ping_thread_stack, PING_THREAD_STACK_SIZE,
+					ping_thread, NULL, NULL, NULL,
+					PING_THREAD_PRIORITY, 0, K_NO_WAIT);
 
 	while(1){
 		static int status_counter = 0;

@@ -22,7 +22,7 @@
 #include <zephyr/logging/log.h>
 
 /* Variable Declaration for Scanning Usage */
-#define DEVICE_NAME  "manoj" // "THINGSX_ESL" //
+#define DEVICE_NAME  "THINGSX_ESL" //"manoj"
 
 #define DEVICE_NAME_LEN     (sizeof(DEVICE_NAME) - 1)
 #define MAX_SCAN_RESULTS      20
